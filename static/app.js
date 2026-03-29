@@ -18,6 +18,9 @@ let selectedAccountId = null;
 let activeAccountId = null;
 let currentState = "idle";
 let accountsSnapshot = [];
+let actionRequestInFlight = false;
+let statusRequestInFlight = false;
+let refreshTimerId = null;
 
 async function request(path, options = {}) {
   const response = await fetch(path, {
@@ -36,7 +39,9 @@ function updateStateBadge(state) {
   stateBadge.className = `state-badge ${state || "idle"}`;
 }
 
-function updateStartButtonState() {
+function updateActionButtons() {
+  stopButton.disabled = actionRequestInFlight || currentState !== "listening";
+
   if (selectedAccountId === null) {
     startButton.textContent = "先选账号";
     startButton.disabled = true;
@@ -48,6 +53,13 @@ function updateStartButtonState() {
     startButton.disabled = true;
     return;
   }
+
+  if (actionRequestInFlight) {
+    startButton.textContent = currentState === "listening" ? "切换中..." : "处理中...";
+    startButton.disabled = true;
+    return;
+  }
+
   startButton.disabled = false;
   if (currentState === "listening" && activeAccountId === selectedAccountId) {
     startButton.textContent = "当前账号监听中";
@@ -90,7 +102,7 @@ function renderAccountList(accounts, options = {}) {
     empty.className = "account-empty";
     empty.textContent = "当前目录没有可用的 outlook_accounts.txt";
     accountList.appendChild(empty);
-    updateStartButtonState();
+    updateActionButtons();
     return;
   }
 
@@ -198,7 +210,7 @@ function renderAccountList(accounts, options = {}) {
   if (preserveScroll) {
     accountList.scrollTop = prevScrollTop;
   }
-  updateStartButtonState();
+  updateActionButtons();
 }
 
 function renderAccounts(payload) {
@@ -239,7 +251,7 @@ function renderStatus(payload) {
   if (shouldRerenderAccountList) {
     renderAccountList(accountsSnapshot, { preserveScroll: true });
   } else {
-    updateStartButtonState();
+    updateActionButtons();
   }
 
   if (payload.error) {
@@ -262,12 +274,35 @@ async function loadAccounts() {
   }
 }
 
+function getRefreshDelay() {
+  if (document.hidden) {
+    return currentState === "listening" ? 2500 : 4000;
+  }
+  return currentState === "listening" ? 900 : 1800;
+}
+
+function scheduleRefresh(delay = getRefreshDelay()) {
+  if (refreshTimerId) {
+    clearTimeout(refreshTimerId);
+  }
+  refreshTimerId = setTimeout(() => {
+    void refreshStatus();
+  }, delay);
+}
+
 async function refreshStatus() {
+  if (statusRequestInFlight) {
+    return;
+  }
+  statusRequestInFlight = true;
   try {
     const payload = await request("/api/status");
     renderStatus(payload);
   } catch (error) {
     hintText.textContent = error.message;
+  } finally {
+    statusRequestInFlight = false;
+    scheduleRefresh();
   }
 }
 
@@ -280,6 +315,8 @@ async function startListening() {
     hintText.textContent = "当前账号已在监听";
     return;
   }
+  actionRequestInFlight = true;
+  updateActionButtons();
   try {
     const payload = await request("/api/start", {
       method: "POST",
@@ -290,10 +327,16 @@ async function startListening() {
     hintText.textContent = selected ? `开始监听 ${selected.email}` : "开始监听";
   } catch (error) {
     hintText.textContent = error.message;
+  } finally {
+    actionRequestInFlight = false;
+    updateActionButtons();
+    scheduleRefresh(250);
   }
 }
 
 async function stopListening() {
+  actionRequestInFlight = true;
+  updateActionButtons();
   try {
     const payload = await request("/api/stop", {
       method: "POST",
@@ -303,6 +346,10 @@ async function stopListening() {
     hintText.textContent = "当前监听已停止";
   } catch (error) {
     hintText.textContent = error.message;
+  } finally {
+    actionRequestInFlight = false;
+    updateActionButtons();
+    scheduleRefresh(250);
   }
 }
 
@@ -318,7 +365,7 @@ async function copyLatestCode() {
 startButton.addEventListener("click", startListening);
 stopButton.addEventListener("click", stopListening);
 copyButton.addEventListener("click", copyLatestCode);
+document.addEventListener("visibilitychange", () => scheduleRefresh(100));
 
 loadAccounts();
-refreshStatus();
-setInterval(refreshStatus, 1000);
+void refreshStatus();
