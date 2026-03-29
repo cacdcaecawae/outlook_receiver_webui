@@ -9,7 +9,6 @@ import json
 from pathlib import Path
 import re
 import threading
-import time
 from typing import Any, Callable, Optional
 import urllib.parse
 import urllib.request
@@ -19,6 +18,7 @@ OUTLOOK_IMAP_HOST = "outlook.office365.com"
 OUTLOOK_IMAP_PORT = 993
 OUTLOOK_IMAP_RECENT_LIMIT = 25
 DEFAULT_POLL_INTERVAL = 3.0
+OUTLOOK_FOLDERS = ("INBOX", "Junk", "Junk Email")
 OPENAI_HINTS = ("openai", "chatgpt", "auth.openai.com", "platform.openai.com")
 CODE_REGEX = re.compile(r"(?<!\d)(\d{6})(?!\d)")
 LINK_REGEX = re.compile(r'https?://[^\s"\'<>]+(?:verify|confirm|activation|email-verification)[^\s"\'<>]*')
@@ -95,10 +95,9 @@ def _message_key(folder: str, msg_id: bytes) -> str:
     return f"{folder}:{msg_id.decode('ascii', errors='ignore')}"
 
 
-def _recent_message_refs(imap: imaplib.IMAP4_SSL) -> list[tuple[str, bytes]]:
-    refs: list[tuple[str, bytes]] = []
-    seen_keys: set[str] = set()
-    for folder in ("INBOX", "Junk", "Junk Email"):
+def _folder_head_keys(imap: imaplib.IMAP4_SSL) -> dict[str, str]:
+    heads: dict[str, str] = {}
+    for folder in OUTLOOK_FOLDERS:
         try:
             status, _ = imap.select(folder)
             if status != "OK":
@@ -106,11 +105,39 @@ def _recent_message_refs(imap: imaplib.IMAP4_SSL) -> list[tuple[str, bytes]]:
             status, messages = imap.search(None, "ALL")
             if status != "OK" or not messages or not messages[0]:
                 continue
-            for msg_id in messages[0].split()[-OUTLOOK_IMAP_RECENT_LIMIT:]:
+            newest_id = messages[0].split()[-1]
+            heads[folder] = _message_key(folder, newest_id)
+        except Exception:
+            continue
+    return heads
+
+
+def _recent_message_refs(
+    imap: imaplib.IMAP4_SSL,
+    baseline_keys: Optional[dict[str, str]] = None,
+    processed_keys: Optional[set[str]] = None,
+) -> list[tuple[str, bytes]]:
+    refs: list[tuple[str, bytes]] = []
+    dedupe_keys: set[str] = set()
+    baseline_keys = baseline_keys or {}
+    processed_keys = processed_keys or set()
+
+    for folder in OUTLOOK_FOLDERS:
+        try:
+            status, _ = imap.select(folder)
+            if status != "OK":
+                continue
+            status, messages = imap.search(None, "ALL")
+            if status != "OK" or not messages or not messages[0]:
+                continue
+            recent_ids = messages[0].split()[-OUTLOOK_IMAP_RECENT_LIMIT:]
+            for msg_id in reversed(recent_ids):
                 key = _message_key(folder, msg_id)
-                if key in seen_keys:
+                if key == baseline_keys.get(folder):
+                    break
+                if key in processed_keys or key in dedupe_keys:
                     continue
-                seen_keys.add(key)
+                dedupe_keys.add(key)
                 refs.append((folder, msg_id))
         except Exception:
             continue
@@ -164,6 +191,7 @@ def _extract_result_from_message(folder: str, msg_id: bytes, raw_email: bytes) -
         "code": code_match.group(1) if code_match.lastindex else code_match.group(0),
         "subject": subject,
         "from": sender,
+        "folder": folder,
         "received_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "message_key": _message_key(folder, msg_id),
     }
@@ -173,7 +201,8 @@ def poll_outlook_account(account: OutlookAccount, stop_event: threading.Event, p
     if not account.ready:
         raise RuntimeError("Selected account is missing client_id or refresh_token")
 
-    seen_keys: set[str] = set()
+    processed_keys: set[str] = set()
+    baseline_keys: Optional[dict[str, str]] = None
     access_token = _request_access_token(account)
 
     while not stop_event.is_set():
@@ -181,12 +210,17 @@ def poll_outlook_account(account: OutlookAccount, stop_event: threading.Event, p
             imap = imaplib.IMAP4_SSL(OUTLOOK_IMAP_HOST, OUTLOOK_IMAP_PORT)
             auth = f"user={account.email}\x01auth=Bearer {access_token}\x01\x01"
             imap.authenticate("XOAUTH2", lambda _: auth.encode())
-            message_refs = _recent_message_refs(imap)
-            for folder, msg_id in reversed(message_refs):
+
+            if baseline_keys is None:
+                baseline_keys = _folder_head_keys(imap)
+                imap.logout()
+                stop_event.wait(poll_interval)
+                continue
+
+            message_refs = _recent_message_refs(imap, baseline_keys=baseline_keys, processed_keys=processed_keys)
+            for folder, msg_id in message_refs:
                 message_key = _message_key(folder, msg_id)
-                if message_key in seen_keys:
-                    continue
-                seen_keys.add(message_key)
+                processed_keys.add(message_key)
                 status, _ = imap.select(folder)
                 if status != "OK":
                     continue
@@ -224,6 +258,7 @@ class OutlookReceiverService:
             "latest_code": "",
             "subject": "",
             "from": "",
+            "folder": "",
             "received_at": "",
             "error": "",
         }
@@ -257,6 +292,7 @@ class OutlookReceiverService:
                     "latest_code": "",
                     "subject": "",
                     "from": "",
+                    "folder": "",
                     "received_at": "",
                     "error": "",
                 }
@@ -290,6 +326,7 @@ class OutlookReceiverService:
                             "latest_code": result.get("code", ""),
                             "subject": result.get("subject", ""),
                             "from": result.get("from", ""),
+                            "folder": result.get("folder", ""),
                             "received_at": result.get("received_at", ""),
                             "error": "",
                         }
@@ -315,4 +352,3 @@ class OutlookReceiverService:
     def status(self) -> dict[str, Any]:
         with self._lock:
             return dict(self._status)
-
