@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
@@ -233,6 +233,7 @@ class OutlookReceiverService:
             {
                 "id": index,
                 "email": account.email,
+                "password": account.password,
                 "ready": account.ready,
             }
             for index, account in enumerate(self._accounts)
@@ -314,3 +315,4 @@ class OutlookReceiverService:
     def status(self) -> dict[str, Any]:
         with self._lock:
             return dict(self._status)
+

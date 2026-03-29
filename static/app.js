@@ -1,4 +1,4 @@
-const accountList = document.getElementById("accountList");
+﻿const accountList = document.getElementById("accountList");
 const startButton = document.getElementById("startButton");
 const stopButton = document.getElementById("stopButton");
 const copyButton = document.getElementById("copyButton");
@@ -34,6 +34,19 @@ function updateStateBadge(state) {
   stateBadge.className = `state-badge ${state || "idle"}`;
 }
 
+async function copyText(value, successMessage) {
+  if (!value) {
+    hintText.textContent = "没有可复制的内容";
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(value);
+    hintText.textContent = successMessage;
+  } catch (error) {
+    hintText.textContent = "复制失败，请手动复制";
+  }
+}
+
 function renderAccountList(accounts) {
   accountsSnapshot = accounts;
   accountList.innerHTML = "";
@@ -52,32 +65,75 @@ function renderAccountList(accounts) {
   }
 
   for (const account of accounts) {
-    const item = document.createElement("button");
-    item.type = "button";
+    const item = document.createElement("article");
     item.className = "account-item";
     if (account.id === selectedAccountId) {
       item.classList.add("selected");
     }
     if (!account.ready) {
-      item.classList.add("disabled");
-      item.disabled = true;
+      item.classList.add("not-ready");
     }
 
-    const title = document.createElement("span");
-    title.className = "account-title";
-    title.textContent = account.email;
+    const head = document.createElement("div");
+    head.className = "account-head";
+
+    const title = document.createElement("div");
+    title.className = "account-title-block";
+
+    const titleText = document.createElement("strong");
+    titleText.className = "account-title";
+    titleText.textContent = account.email;
 
     const meta = document.createElement("span");
     meta.className = "account-meta";
     meta.textContent = account.ready ? "OAuth 已就绪" : "缺少 client_id 或 refresh_token";
 
-    item.appendChild(title);
-    item.appendChild(meta);
-    item.addEventListener("click", () => {
+    title.appendChild(titleText);
+    title.appendChild(meta);
+
+    const status = document.createElement("span");
+    status.className = `account-status ${account.ready ? "ready" : "blocked"}`;
+    status.textContent = account.ready ? "可监听" : "不可监听";
+
+    head.appendChild(title);
+    head.appendChild(status);
+
+    const emailRow = document.createElement("div");
+    emailRow.className = "account-secret";
+    emailRow.title = "点击复制账号";
+    emailRow.innerHTML = `<span class="account-secret-label">账号</span><code class="account-secret-value">${account.email}</code>`;
+    emailRow.addEventListener("click", () => {
+      copyText(account.email, `已复制账号 ${account.email}`);
+    });
+
+    const passwordRow = document.createElement("div");
+    passwordRow.className = "account-secret";
+    passwordRow.title = "点击复制密码";
+    passwordRow.innerHTML = `<span class="account-secret-label">密码</span><code class="account-secret-value">${account.password || "-"}</code>`;
+    passwordRow.addEventListener("click", () => {
+      copyText(account.password, `已复制 ${account.email} 的密码`);
+    });
+
+    const actions = document.createElement("div");
+    actions.className = "account-actions";
+
+    const selectButton = document.createElement("button");
+    selectButton.type = "button";
+    selectButton.className = "account-action account-select";
+    selectButton.textContent = account.ready ? "选中监听" : "不可监听";
+    selectButton.disabled = !account.ready;
+    selectButton.addEventListener("click", () => {
       selectedAccountId = account.id;
       renderAccountList(accountsSnapshot);
       hintText.textContent = `已选择 ${account.email}`;
     });
+
+    actions.appendChild(selectButton);
+
+    item.appendChild(head);
+    item.appendChild(emailRow);
+    item.appendChild(passwordRow);
+    item.appendChild(actions);
     accountList.appendChild(item);
   }
 }
@@ -172,12 +228,7 @@ async function copyLatestCode() {
     hintText.textContent = "当前没有可复制的验证码";
     return;
   }
-  try {
-    await navigator.clipboard.writeText(value);
-    hintText.textContent = `已复制验证码 ${value}`;
-  } catch (error) {
-    hintText.textContent = "复制失败，请手动复制";
-  }
+  await copyText(value, `已复制验证码 ${value}`);
 }
 
 startButton.addEventListener("click", startListening);
@@ -187,4 +238,3 @@ copyButton.addEventListener("click", copyLatestCode);
 loadAccounts();
 refreshStatus();
 setInterval(refreshStatus, 1000);
-

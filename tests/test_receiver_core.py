@@ -1,4 +1,4 @@
-from pathlib import Path
+﻿from pathlib import Path
 import tempfile
 import time
 import unittest
@@ -77,7 +77,10 @@ class WebUiAppTests(unittest.TestCase):
         self.assertEqual(payload["ready_count"], 1)
         self.assertEqual(payload["unready_count"], 1)
         self.assertEqual(payload["accounts"][0]["email"], "alpha@example.com")
+        self.assertEqual(payload["accounts"][0]["password"], "pw")
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
