@@ -186,6 +186,56 @@ class ReceiverCoreTests(unittest.TestCase):
 
         self.assertEqual(status["state"], "stopped")
         self.assertEqual(status["latest_code"], "654321")
+
+    def test_stale_old_listener_does_not_override_new_selection(self):
+        account_a = receiver_core.OutlookAccount(
+            email="alpha@example.com",
+            password="pw-a",
+            client_id="cid-a",
+            refresh_token="rt-a",
+        )
+        account_b = receiver_core.OutlookAccount(
+            email="beta@example.com",
+            password="pw-b",
+            client_id="cid-b",
+            refresh_token="rt-b",
+        )
+        service = receiver_core.OutlookReceiverService([account_a, account_b], poll_interval=0.01)
+        old_started = threading.Event()
+        old_release = threading.Event()
+        new_started = threading.Event()
+        new_release = threading.Event()
+
+        def old_poll(_account, _stop_event):
+            old_started.set()
+            old_release.wait(timeout=4)
+            return None
+
+        def new_poll(_account, stop_event):
+            new_started.set()
+            new_release.wait(timeout=2)
+            stop_event.set()
+            return None
+
+        service.start(0, poller=old_poll)
+        self.assertTrue(old_started.wait(timeout=1))
+
+        # Switch to another account while old poller is still blocked.
+        service.start(1, poller=new_poll)
+        self.assertTrue(new_started.wait(timeout=1))
+
+        # Let the stale old listener finish after the new one is already active.
+        old_release.set()
+        time.sleep(0.2)
+        status = service.status()
+
+        self.assertEqual(status["selected_index"], 1)
+        self.assertEqual(status["selected_account"], "beta@example.com")
+        self.assertEqual(status["state"], "listening")
+
+        new_release.set()
+        service.stop()
+
     def test_poll_outlook_account_prefers_inbox_before_junk_for_new_mail(self):
         account = receiver_core.OutlookAccount(
             email="alpha@example.com",

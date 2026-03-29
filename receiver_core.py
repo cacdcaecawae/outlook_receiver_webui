@@ -249,6 +249,7 @@ class OutlookReceiverService:
         self._accounts = accounts
         self._poll_interval = poll_interval
         self._lock = threading.Lock()
+        self._listener_generation = 0
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._status: dict[str, Any] = {
@@ -270,20 +271,46 @@ class OutlookReceiverService:
                 "email": account.email,
                 "password": account.password,
                 "ready": account.ready,
-            }
+                }
             for index, account in enumerate(self._accounts)
         ]
+
+    def _stop_current_listener(self, *, mark_stopped: bool) -> None:
+        with self._lock:
+            # Bump generation first so stale listener threads cannot override new state.
+            self._listener_generation += 1
+            thread = self._thread
+            stop_event = self._stop_event
+
+        stop_event.set()
+        if thread and thread.is_alive():
+            thread.join(timeout=1.5)
+
+        with self._lock:
+            if self._thread is thread:
+                self._thread = None
+            if (
+                mark_stopped
+                and self._status.get("selected_index") is not None
+                and self._status["state"] != "error"
+            ):
+                self._status["state"] = "stopped"
 
     def start(self, account_index: int, poller: Optional[Callable[[OutlookAccount, threading.Event], Optional[dict[str, str]]]] = None) -> dict[str, Any]:
         if account_index < 0 or account_index >= len(self._accounts):
             raise IndexError("Invalid account selection")
-        self.stop()
         account = self._accounts[account_index]
         if not account.ready:
             raise RuntimeError("Selected account is missing client_id or refresh_token")
 
-        self._stop_event = threading.Event()
+        self._stop_current_listener(mark_stopped=False)
+        stop_event = threading.Event()
+        effective_poller = poller or (lambda selected, event: poll_outlook_account(selected, event, self._poll_interval))
+
         with self._lock:
+            self._listener_generation += 1
+            generation = self._listener_generation
+            self._stop_event = stop_event
             self._status.update(
                 {
                     "state": "listening",
@@ -298,17 +325,19 @@ class OutlookReceiverService:
                 }
             )
 
-        effective_poller = poller or (lambda selected, stop_event: poll_outlook_account(selected, stop_event, self._poll_interval))
-        self._thread = threading.Thread(
+        thread = threading.Thread(
             target=self._run_listener,
-            args=(account, effective_poller, self._stop_event),
+            args=(generation, account, effective_poller, stop_event),
             daemon=True,
         )
-        self._thread.start()
+        with self._lock:
+            self._thread = thread
+        thread.start()
         return self.status()
 
     def _run_listener(
         self,
+        generation: int,
         account: OutlookAccount,
         poller: Callable[[OutlookAccount, threading.Event], Optional[dict[str, str]]],
         stop_event: threading.Event,
@@ -317,6 +346,8 @@ class OutlookReceiverService:
             try:
                 result = poller(account, stop_event)
                 with self._lock:
+                    if generation != self._listener_generation:
+                        return
                     if stop_event.is_set():
                         self._status["state"] = "stopped"
                         return
@@ -337,19 +368,14 @@ class OutlookReceiverService:
                     return
             except Exception as exc:
                 with self._lock:
+                    if generation != self._listener_generation:
+                        return
                     self._status["state"] = "error"
                     self._status["error"] = str(exc)
                 return
 
     def stop(self) -> dict[str, Any]:
-        thread = self._thread
-        self._stop_event.set()
-        if thread and thread.is_alive():
-            thread.join(timeout=1.5)
-        self._thread = None
-        with self._lock:
-            if self._status.get("selected_index") is not None and self._status["state"] != "error":
-                self._status["state"] = "stopped"
+        self._stop_current_listener(mark_stopped=True)
         return self.status()
 
     def status(self) -> dict[str, Any]:

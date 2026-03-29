@@ -74,7 +74,9 @@ async function copyText(value, successMessage) {
   }
 }
 
-function renderAccountList(accounts) {
+function renderAccountList(accounts, options = {}) {
+  const preserveScroll = options.preserveScroll === true;
+  const prevScrollTop = preserveScroll ? accountList.scrollTop : 0;
   accountsSnapshot = accounts;
   accountList.innerHTML = "";
 
@@ -171,7 +173,7 @@ function renderAccountList(accounts) {
     selectButton.addEventListener("click", (event) => {
       event.stopPropagation();
       selectedAccountId = account.id;
-      renderAccountList(accountsSnapshot);
+      renderAccountList(accountsSnapshot, { preserveScroll: true });
       hintText.textContent = `已选择 ${account.email}`;
     });
 
@@ -180,7 +182,7 @@ function renderAccountList(accounts) {
         return;
       }
       selectedAccountId = account.id;
-      renderAccountList(accountsSnapshot);
+      renderAccountList(accountsSnapshot, { preserveScroll: true });
       hintText.textContent = `已选择 ${account.email}`;
     });
 
@@ -193,6 +195,9 @@ function renderAccountList(accounts) {
     accountList.appendChild(item);
   }
 
+  if (preserveScroll) {
+    accountList.scrollTop = prevScrollTop;
+  }
   updateStartButtonState();
 }
 
@@ -208,6 +213,10 @@ function renderAccounts(payload) {
 }
 
 function renderStatus(payload) {
+  const prevState = currentState;
+  const prevActiveAccountId = activeAccountId;
+  const prevSelectedAccountId = selectedAccountId;
+
   currentState = payload.state || "idle";
   activeAccountId = typeof payload.selected_index === "number" ? payload.selected_index : null;
 
@@ -222,7 +231,16 @@ function renderStatus(payload) {
   receivedAtText.textContent = payload.received_at || "-";
   updateStateBadge(currentState);
 
-  renderAccountList(accountsSnapshot);
+  const shouldRerenderAccountList =
+    prevState !== currentState ||
+    prevActiveAccountId !== activeAccountId ||
+    prevSelectedAccountId !== selectedAccountId;
+
+  if (shouldRerenderAccountList) {
+    renderAccountList(accountsSnapshot, { preserveScroll: true });
+  } else {
+    updateStartButtonState();
+  }
 
   if (payload.error) {
     hintText.textContent = payload.error;
