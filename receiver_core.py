@@ -313,42 +313,46 @@ class OutlookReceiverService:
         poller: Callable[[OutlookAccount, threading.Event], Optional[dict[str, str]]],
         stop_event: threading.Event,
     ) -> None:
-        try:
-            result = poller(account, stop_event)
-            with self._lock:
-                if stop_event.is_set():
-                    self._status["state"] = "stopped"
-                    return
-                if result:
-                    self._status.update(
-                        {
-                            "state": "received",
-                            "latest_code": result.get("code", ""),
-                            "subject": result.get("subject", ""),
-                            "from": result.get("from", ""),
-                            "folder": result.get("folder", ""),
-                            "received_at": result.get("received_at", ""),
-                            "error": "",
-                        }
-                    )
-                else:
+        while not stop_event.is_set():
+            try:
+                result = poller(account, stop_event)
+                with self._lock:
+                    if stop_event.is_set():
+                        self._status["state"] = "stopped"
+                        return
+                    if result:
+                        self._status.update(
+                            {
+                                "state": "listening",
+                                "latest_code": result.get("code", ""),
+                                "subject": result.get("subject", ""),
+                                "from": result.get("from", ""),
+                                "folder": result.get("folder", ""),
+                                "received_at": result.get("received_at", ""),
+                                "error": "",
+                            }
+                        )
+                        continue
                     self._status["state"] = "idle"
-        except Exception as exc:
-            with self._lock:
-                self._status["state"] = "error"
-                self._status["error"] = str(exc)
+                    return
+            except Exception as exc:
+                with self._lock:
+                    self._status["state"] = "error"
+                    self._status["error"] = str(exc)
+                return
 
     def stop(self) -> dict[str, Any]:
         thread = self._thread
+        self._stop_event.set()
         if thread and thread.is_alive():
-            self._stop_event.set()
             thread.join(timeout=1.5)
         self._thread = None
         with self._lock:
-            if self._status["state"] == "listening":
+            if self._status.get("selected_index") is not None and self._status["state"] != "error":
                 self._status["state"] = "stopped"
         return self.status()
 
     def status(self) -> dict[str, Any]:
         with self._lock:
             return dict(self._status)
+

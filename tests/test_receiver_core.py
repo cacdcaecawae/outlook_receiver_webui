@@ -73,7 +73,7 @@ class ReceiverCoreTests(unittest.TestCase):
         self.assertEqual(accounts[0].email, "alpha@example.com")
         self.assertEqual(accounts[1].client_id, "cid2")
 
-    def test_listener_state_updates_when_message_arrives(self):
+    def test_listener_keeps_listening_after_message_arrives(self):
         account = receiver_core.OutlookAccount(
             email="alpha@example.com",
             password="pw",
@@ -81,23 +81,35 @@ class ReceiverCoreTests(unittest.TestCase):
             refresh_token="rt",
         )
         service = receiver_core.OutlookReceiverService([account], poll_interval=0.01)
+        entered_second_poll = threading.Event()
+        release_second_poll = threading.Event()
+        call_count = {"value": 0}
 
         def fake_poll(_account, stop_event):
-            return {
-                "code": "123456",
-                "subject": "Your OpenAI code",
-                "from": "account-security@openai.com",
-                "received_at": "2026-03-29 19:30:00",
-            }
+            call_count["value"] += 1
+            if call_count["value"] == 1:
+                return {
+                    "code": "123456",
+                    "subject": "Your OpenAI code",
+                    "from": "account-security@openai.com",
+                    "folder": "INBOX",
+                    "received_at": "2026-03-29 19:30:00",
+                }
+            entered_second_poll.set()
+            release_second_poll.wait(timeout=1)
+            stop_event.set()
+            return None
 
         service.start(0, poller=fake_poll)
-        time.sleep(0.05)
+        self.assertTrue(entered_second_poll.wait(timeout=1))
         status = service.status()
+        release_second_poll.set()
         service.stop()
 
         self.assertEqual(status["selected_account"], "alpha@example.com")
         self.assertEqual(status["latest_code"], "123456")
-        self.assertEqual(status["state"], "received")
+        self.assertEqual(status["state"], "listening")
+        self.assertEqual(status["folder"], "INBOX")
 
     def test_poll_outlook_account_ignores_existing_junk_mail_at_startup(self):
         account = receiver_core.OutlookAccount(
@@ -139,7 +151,41 @@ class ReceiverCoreTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["code"], "222222")
         self.assertEqual(result["subject"], "Fresh OpenAI code")
+        self.assertEqual(result["folder"], "INBOX")
 
+    def test_stop_marks_listener_stopped_after_receiving_a_message(self):
+        account = receiver_core.OutlookAccount(
+            email="alpha@example.com",
+            password="pw",
+            client_id="cid",
+            refresh_token="rt",
+        )
+        service = receiver_core.OutlookReceiverService([account], poll_interval=0.01)
+        entered_second_poll = threading.Event()
+        release_second_poll = threading.Event()
+        call_count = {"value": 0}
+
+        def fake_poll(_account, stop_event):
+            call_count["value"] += 1
+            if call_count["value"] == 1:
+                return {
+                    "code": "654321",
+                    "subject": "Another OpenAI code",
+                    "from": "account-security@openai.com",
+                    "folder": "INBOX",
+                    "received_at": "2026-03-29 19:31:00",
+                }
+            entered_second_poll.set()
+            release_second_poll.wait(timeout=1)
+            return None
+
+        service.start(0, poller=fake_poll)
+        self.assertTrue(entered_second_poll.wait(timeout=1))
+        status = service.stop()
+        release_second_poll.set()
+
+        self.assertEqual(status["state"], "stopped")
+        self.assertEqual(status["latest_code"], "654321")
     def test_poll_outlook_account_prefers_inbox_before_junk_for_new_mail(self):
         account = receiver_core.OutlookAccount(
             email="alpha@example.com",
@@ -180,6 +226,7 @@ class ReceiverCoreTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["code"], "333333")
         self.assertEqual(result["subject"], "Inbox OpenAI code")
+        self.assertEqual(result["folder"], "INBOX")
 
 
 class WebUiAppTests(unittest.TestCase):
@@ -214,3 +261,4 @@ class WebUiAppTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

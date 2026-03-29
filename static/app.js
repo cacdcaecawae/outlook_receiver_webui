@@ -238,3 +238,4 @@ copyButton.addEventListener("click", copyLatestCode);
 loadAccounts();
 refreshStatus();
 setInterval(refreshStatus, 1000);
+
