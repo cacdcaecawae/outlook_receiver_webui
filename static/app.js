@@ -15,6 +15,8 @@ const hintText = document.getElementById("hintText");
 const accountsFileText = document.getElementById("accountsFileText");
 
 let selectedAccountId = null;
+let activeAccountId = null;
+let currentState = "idle";
 let accountsSnapshot = [];
 
 async function request(path, options = {}) {
@@ -32,6 +34,31 @@ async function request(path, options = {}) {
 function updateStateBadge(state) {
   stateBadge.textContent = state || "idle";
   stateBadge.className = `state-badge ${state || "idle"}`;
+}
+
+function updateStartButtonState() {
+  if (selectedAccountId === null) {
+    startButton.textContent = "先选账号";
+    startButton.disabled = true;
+    return;
+  }
+  const selected = accountsSnapshot.find((account) => account.id === selectedAccountId);
+  if (!selected || !selected.ready) {
+    startButton.textContent = "账号不可监听";
+    startButton.disabled = true;
+    return;
+  }
+  startButton.disabled = false;
+  if (currentState === "listening" && activeAccountId === selectedAccountId) {
+    startButton.textContent = "当前账号监听中";
+    startButton.disabled = true;
+    return;
+  }
+  if (currentState === "listening" && activeAccountId !== null && activeAccountId !== selectedAccountId) {
+    startButton.textContent = "切换到该账号";
+    return;
+  }
+  startButton.textContent = "开始监听";
 }
 
 async function copyText(value, successMessage) {
@@ -61,14 +88,21 @@ function renderAccountList(accounts) {
     empty.className = "account-empty";
     empty.textContent = "当前目录没有可用的 outlook_accounts.txt";
     accountList.appendChild(empty);
+    updateStartButtonState();
     return;
   }
 
   for (const account of accounts) {
     const item = document.createElement("article");
     item.className = "account-item";
-    if (account.id === selectedAccountId) {
+    const isSelected = account.id === selectedAccountId;
+    const isActive = account.id === activeAccountId && currentState === "listening";
+
+    if (isSelected) {
       item.classList.add("selected");
+    }
+    if (isActive) {
+      item.classList.add("active");
     }
     if (!account.ready) {
       item.classList.add("not-ready");
@@ -92,25 +126,37 @@ function renderAccountList(accounts) {
     title.appendChild(meta);
 
     const status = document.createElement("span");
-    status.className = `account-status ${account.ready ? "ready" : "blocked"}`;
-    status.textContent = account.ready ? "可监听" : "不可监听";
+    if (!account.ready) {
+      status.className = "account-status blocked";
+      status.textContent = "不可监听";
+    } else if (isActive) {
+      status.className = "account-status listening";
+      status.textContent = "监听中";
+    } else {
+      status.className = "account-status ready";
+      status.textContent = "可监听";
+    }
 
     head.appendChild(title);
     head.appendChild(status);
 
-    const emailRow = document.createElement("div");
+    const emailRow = document.createElement("button");
+    emailRow.type = "button";
     emailRow.className = "account-secret";
     emailRow.title = "点击复制账号";
     emailRow.innerHTML = `<span class="account-secret-label">账号</span><code class="account-secret-value">${account.email}</code>`;
-    emailRow.addEventListener("click", () => {
+    emailRow.addEventListener("click", (event) => {
+      event.stopPropagation();
       copyText(account.email, `已复制账号 ${account.email}`);
     });
 
-    const passwordRow = document.createElement("div");
+    const passwordRow = document.createElement("button");
+    passwordRow.type = "button";
     passwordRow.className = "account-secret";
     passwordRow.title = "点击复制密码";
     passwordRow.innerHTML = `<span class="account-secret-label">密码</span><code class="account-secret-value">${account.password || "-"}</code>`;
-    passwordRow.addEventListener("click", () => {
+    passwordRow.addEventListener("click", (event) => {
+      event.stopPropagation();
       copyText(account.password, `已复制 ${account.email} 的密码`);
     });
 
@@ -120,9 +166,19 @@ function renderAccountList(accounts) {
     const selectButton = document.createElement("button");
     selectButton.type = "button";
     selectButton.className = "account-action account-select";
-    selectButton.textContent = account.ready ? "选中监听" : "不可监听";
+    selectButton.textContent = isSelected ? "已选中" : "选中监听";
     selectButton.disabled = !account.ready;
-    selectButton.addEventListener("click", () => {
+    selectButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      selectedAccountId = account.id;
+      renderAccountList(accountsSnapshot);
+      hintText.textContent = `已选择 ${account.email}`;
+    });
+
+    item.addEventListener("click", () => {
+      if (!account.ready) {
+        return;
+      }
       selectedAccountId = account.id;
       renderAccountList(accountsSnapshot);
       hintText.textContent = `已选择 ${account.email}`;
@@ -136,6 +192,8 @@ function renderAccountList(accounts) {
     item.appendChild(actions);
     accountList.appendChild(item);
   }
+
+  updateStartButtonState();
 }
 
 function renderAccounts(payload) {
@@ -150,26 +208,30 @@ function renderAccounts(payload) {
 }
 
 function renderStatus(payload) {
+  currentState = payload.state || "idle";
+  activeAccountId = typeof payload.selected_index === "number" ? payload.selected_index : null;
+
+  if (selectedAccountId === null && activeAccountId !== null) {
+    selectedAccountId = activeAccountId;
+  }
+
   latestCode.textContent = payload.latest_code || "------";
   accountText.textContent = payload.selected_account || "-";
   fromText.textContent = payload.from || "-";
   subjectText.textContent = payload.subject || "-";
   receivedAtText.textContent = payload.received_at || "-";
-  updateStateBadge(payload.state);
+  updateStateBadge(currentState);
 
-  if (typeof payload.selected_index === "number") {
-    selectedAccountId = payload.selected_index;
-    renderAccountList(accountsSnapshot);
-  }
+  renderAccountList(accountsSnapshot);
 
   if (payload.error) {
     hintText.textContent = payload.error;
-  } else if (payload.state === "listening") {
-    hintText.textContent = "正在监听最新邮件";
-  } else if (payload.state === "received") {
-    hintText.textContent = "已收到最新验证码";
-  } else if (payload.state === "stopped") {
-    hintText.textContent = "当前监听已停止";
+  } else if (currentState === "listening") {
+    hintText.textContent = payload.latest_code ? "已收到验证码，继续监听中" : "正在监听最新邮件";
+  } else if (currentState === "stopped") {
+    hintText.textContent = "监听已停止，可切换账号继续";
+  } else if (currentState === "idle") {
+    hintText.textContent = "等待开始监听";
   }
 }
 
@@ -194,6 +256,10 @@ async function refreshStatus() {
 async function startListening() {
   if (selectedAccountId === null) {
     hintText.textContent = "先从左侧选择一个账号";
+    return;
+  }
+  if (currentState === "listening" && activeAccountId === selectedAccountId) {
+    hintText.textContent = "当前账号已在监听";
     return;
   }
   try {
@@ -238,4 +304,3 @@ copyButton.addEventListener("click", copyLatestCode);
 loadAccounts();
 refreshStatus();
 setInterval(refreshStatus, 1000);
-
