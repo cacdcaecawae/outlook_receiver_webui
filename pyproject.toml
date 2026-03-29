@@ -1,0 +1,7 @@
+[project]
+name = "outlook-receiver-webui"
+version = "0.1.0"
+description = "Standalone local web UI for receiving Outlook verification codes"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []

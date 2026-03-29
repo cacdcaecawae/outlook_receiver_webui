@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Outlook 自动接码控制台</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <main class="page">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark">S2</div>
+          <div>
+            <p class="brand-kicker">Sub2API Style Local Tool</p>
+            <h1>Outlook 自动接码控制台</h1>
+            <p class="brand-subtitle">单账号监听，本机运行，选择账号后开始监听最新验证码。</p>
+          </div>
+        </div>
+
+        <div class="topbar-stats">
+          <article class="stat-card">
+            <span>账号总数</span>
+            <strong id="totalCount">0</strong>
+          </article>
+          <article class="stat-card">
+            <span>可用账号</span>
+            <strong id="readyCount">0</strong>
+          </article>
+          <article class="stat-card">
+            <span>当前状态</span>
+            <strong id="stateBadge" class="state-badge idle">idle</strong>
+          </article>
+        </div>
+      </header>
+
+      <section class="layout">
+        <aside class="sidebar card">
+          <div class="panel-head">
+            <div>
+              <p class="panel-kicker">Accounts</p>
+              <h2>账号列表</h2>
+            </div>
+            <span class="panel-badge" id="accountsCountBadge">0</span>
+          </div>
+          <p id="accountsFileText" class="panel-meta">正在加载账号文件...</p>
+          <div id="accountList" class="account-list"></div>
+        </aside>
+
+        <section class="content">
+          <section class="hero card">
+            <div class="hero-main">
+              <p class="panel-kicker">Latest OTP</p>
+              <div class="code-row">
+                <div id="latestCode" class="code-value">------</div>
+                <button id="copyButton" class="btn btn-ghost" type="button">复制</button>
+              </div>
+              <p id="hintText" class="hero-hint">等待开始监听</p>
+            </div>
+            <div class="hero-actions">
+              <button id="startButton" class="btn btn-primary" type="button">开始监听</button>
+              <button id="stopButton" class="btn btn-secondary" type="button">停止</button>
+            </div>
+          </section>
+
+          <section class="details-grid">
+            <article class="detail-card card emphasis">
+              <span class="detail-label">当前账号</span>
+              <strong id="accountText">-</strong>
+            </article>
+            <article class="detail-card card">
+              <span class="detail-label">发件人</span>
+              <strong id="fromText">-</strong>
+            </article>
+            <article class="detail-card card wide">
+              <span class="detail-label">邮件主题</span>
+              <strong id="subjectText">-</strong>
+            </article>
+            <article class="detail-card card">
+              <span class="detail-label">收到时间</span>
+              <strong id="receivedAtText">-</strong>
+            </article>
+          </section>
+        </section>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
