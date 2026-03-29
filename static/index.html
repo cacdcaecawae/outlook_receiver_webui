@@ -19,15 +19,15 @@
         </div>
 
         <div class="topbar-stats">
-          <article class="stat-card">
+          <article class="stat-chip">
             <span>账号总数</span>
             <strong id="totalCount">0</strong>
           </article>
-          <article class="stat-card">
+          <article class="stat-chip">
             <span>可用账号</span>
             <strong id="readyCount">0</strong>
           </article>
-          <article class="stat-card">
+          <article class="stat-chip status-chip">
             <span>当前状态</span>
             <strong id="stateBadge" class="state-badge idle">idle</strong>
           </article>
@@ -51,23 +51,27 @@
           <section class="hero card">
             <div class="hero-main">
               <p class="panel-kicker">Latest OTP</p>
+              <h2 class="hero-title">当前账号的最新验证码会显示在这里</h2>
+              <p class="hero-copy">界面保持单账号监听。左侧选中账号，点击开始后，页面会自动轮询并更新最新结果。</p>
               <div class="code-row">
                 <div id="latestCode" class="code-value">------</div>
-                <button id="copyButton" class="btn btn-ghost" type="button">复制</button>
+                <button id="copyButton" class="btn btn-ghost" type="button">复制验证码</button>
               </div>
               <p id="hintText" class="hero-hint">等待开始监听</p>
             </div>
-            <div class="hero-actions">
-              <button id="startButton" class="btn btn-primary" type="button">开始监听</button>
-              <button id="stopButton" class="btn btn-secondary" type="button">停止</button>
+            <div class="hero-side">
+              <div class="hero-side-card">
+                <span class="detail-label">当前账号</span>
+                <strong id="accountText">-</strong>
+              </div>
+              <div class="hero-actions">
+                <button id="startButton" class="btn btn-primary" type="button">开始监听</button>
+                <button id="stopButton" class="btn btn-secondary" type="button">停止</button>
+              </div>
             </div>
           </section>
 
           <section class="details-grid">
-            <article class="detail-card card emphasis">
-              <span class="detail-label">当前账号</span>
-              <strong id="accountText">-</strong>
-            </article>
             <article class="detail-card card">
               <span class="detail-label">发件人</span>
               <strong id="fromText">-</strong>
