@@ -1,13 +1,19 @@
-﻿const accountList = document.getElementById("accountList");
+const accountList = document.getElementById("accountList");
 const startButton = document.getElementById("startButton");
 const stopButton = document.getElementById("stopButton");
 const copyButton = document.getElementById("copyButton");
+const copyAccountButton = document.getElementById("copyAccountButton");
+const togglePasswordButton = document.getElementById("togglePasswordButton");
+const copyPasswordButton = document.getElementById("copyPasswordButton");
 const latestCode = document.getElementById("latestCode");
 const stateBadge = document.getElementById("stateBadge");
 const totalCount = document.getElementById("totalCount");
 const readyCount = document.getElementById("readyCount");
 const accountsCountBadge = document.getElementById("accountsCountBadge");
 const accountText = document.getElementById("accountText");
+const selectedAccountText = document.getElementById("selectedAccountText");
+const selectedAccountMeta = document.getElementById("selectedAccountMeta");
+const selectedPasswordText = document.getElementById("selectedPasswordText");
 const fromText = document.getElementById("fromText");
 const subjectText = document.getElementById("subjectText");
 const receivedAtText = document.getElementById("receivedAtText");
@@ -21,6 +27,7 @@ let accountsSnapshot = [];
 let actionRequestInFlight = false;
 let statusRequestInFlight = false;
 let refreshTimerId = null;
+let passwordVisible = false;
 
 async function request(path, options = {}) {
   const response = await fetch(path, {
@@ -34,6 +41,14 @@ async function request(path, options = {}) {
   return payload;
 }
 
+function getSelectedAccount() {
+  return accountsSnapshot.find((account) => account.id === selectedAccountId) || null;
+}
+
+function getActiveAccount() {
+  return accountsSnapshot.find((account) => account.id === activeAccountId) || null;
+}
+
 function updateStateBadge(state) {
   stateBadge.textContent = state || "idle";
   stateBadge.className = `state-badge ${state || "idle"}`;
@@ -41,13 +56,17 @@ function updateStateBadge(state) {
 
 function updateActionButtons() {
   stopButton.disabled = actionRequestInFlight || currentState !== "listening";
+  copyAccountButton.disabled = selectedAccountId === null;
+  copyPasswordButton.disabled = selectedAccountId === null;
+  togglePasswordButton.disabled = selectedAccountId === null;
 
   if (selectedAccountId === null) {
     startButton.textContent = "先选账号";
     startButton.disabled = true;
     return;
   }
-  const selected = accountsSnapshot.find((account) => account.id === selectedAccountId);
+
+  const selected = getSelectedAccount();
   if (!selected || !selected.ready) {
     startButton.textContent = "账号不可监听";
     startButton.disabled = true;
@@ -71,6 +90,27 @@ function updateActionButtons() {
     return;
   }
   startButton.textContent = "开始监听";
+}
+
+function updateSelectedAccountPanel() {
+  const selected = getSelectedAccount();
+  const active = getActiveAccount();
+
+  selectedAccountText.textContent = selected ? selected.email : "-";
+  selectedAccountMeta.textContent = active
+    ? `当前监听账号: ${active.email}`
+    : "当前监听账号: -";
+
+  if (!selected) {
+    selectedPasswordText.textContent = "******";
+    togglePasswordButton.textContent = "显示密码";
+    updateActionButtons();
+    return;
+  }
+
+  selectedPasswordText.textContent = passwordVisible ? (selected.password || "-") : "******";
+  togglePasswordButton.textContent = passwordVisible ? "隐藏密码" : "显示密码";
+  updateActionButtons();
 }
 
 async function copyText(value, successMessage) {
@@ -102,13 +142,15 @@ function renderAccountList(accounts, options = {}) {
     empty.className = "account-empty";
     empty.textContent = "当前目录没有可用的 outlook_accounts.txt";
     accountList.appendChild(empty);
-    updateActionButtons();
+    updateSelectedAccountPanel();
     return;
   }
 
   for (const account of accounts) {
-    const item = document.createElement("article");
+    const item = document.createElement("button");
+    item.type = "button";
     item.className = "account-item";
+
     const isSelected = account.id === selectedAccountId;
     const isActive = account.id === activeAccountId && currentState === "listening";
 
@@ -122,11 +164,11 @@ function renderAccountList(accounts, options = {}) {
       item.classList.add("not-ready");
     }
 
-    const head = document.createElement("div");
-    head.className = "account-head";
+    const row = document.createElement("div");
+    row.className = "account-row";
 
-    const title = document.createElement("div");
-    title.className = "account-title-block";
+    const titleBlock = document.createElement("div");
+    titleBlock.className = "account-title-block";
 
     const titleText = document.createElement("strong");
     titleText.className = "account-title";
@@ -134,10 +176,18 @@ function renderAccountList(accounts, options = {}) {
 
     const meta = document.createElement("span");
     meta.className = "account-meta";
-    meta.textContent = account.ready ? "OAuth 已就绪" : "缺少 client_id 或 refresh_token";
+    if (!account.ready) {
+      meta.textContent = "缺少 client_id 或 refresh_token";
+    } else if (isActive) {
+      meta.textContent = "当前正在监听";
+    } else if (isSelected) {
+      meta.textContent = "已选中，等待切换";
+    } else {
+      meta.textContent = "点击选中";
+    }
 
-    title.appendChild(titleText);
-    title.appendChild(meta);
+    titleBlock.appendChild(titleText);
+    titleBlock.appendChild(meta);
 
     const status = document.createElement("span");
     if (!account.ready) {
@@ -146,71 +196,35 @@ function renderAccountList(accounts, options = {}) {
     } else if (isActive) {
       status.className = "account-status listening";
       status.textContent = "监听中";
+    } else if (isSelected) {
+      status.className = "account-status selected";
+      status.textContent = "已选中";
     } else {
       status.className = "account-status ready";
       status.textContent = "可监听";
     }
 
-    head.appendChild(title);
-    head.appendChild(status);
-
-    const emailRow = document.createElement("button");
-    emailRow.type = "button";
-    emailRow.className = "account-secret";
-    emailRow.title = "点击复制账号";
-    emailRow.innerHTML = `<span class="account-secret-label">账号</span><code class="account-secret-value">${account.email}</code>`;
-    emailRow.addEventListener("click", (event) => {
-      event.stopPropagation();
-      copyText(account.email, `已复制账号 ${account.email}`);
-    });
-
-    const passwordRow = document.createElement("button");
-    passwordRow.type = "button";
-    passwordRow.className = "account-secret";
-    passwordRow.title = "点击复制密码";
-    passwordRow.innerHTML = `<span class="account-secret-label">密码</span><code class="account-secret-value">${account.password || "-"}</code>`;
-    passwordRow.addEventListener("click", (event) => {
-      event.stopPropagation();
-      copyText(account.password, `已复制 ${account.email} 的密码`);
-    });
-
-    const actions = document.createElement("div");
-    actions.className = "account-actions";
-
-    const selectButton = document.createElement("button");
-    selectButton.type = "button";
-    selectButton.className = "account-action account-select";
-    selectButton.textContent = isSelected ? "已选中" : "选中监听";
-    selectButton.disabled = !account.ready;
-    selectButton.addEventListener("click", (event) => {
-      event.stopPropagation();
-      selectedAccountId = account.id;
-      renderAccountList(accountsSnapshot, { preserveScroll: true });
-      hintText.textContent = `已选择 ${account.email}`;
-    });
+    row.appendChild(titleBlock);
+    row.appendChild(status);
+    item.appendChild(row);
 
     item.addEventListener("click", () => {
       if (!account.ready) {
         return;
       }
       selectedAccountId = account.id;
+      passwordVisible = false;
       renderAccountList(accountsSnapshot, { preserveScroll: true });
       hintText.textContent = `已选择 ${account.email}`;
     });
 
-    actions.appendChild(selectButton);
-
-    item.appendChild(head);
-    item.appendChild(emailRow);
-    item.appendChild(passwordRow);
-    item.appendChild(actions);
     accountList.appendChild(item);
   }
 
   if (preserveScroll) {
     accountList.scrollTop = prevScrollTop;
   }
-  updateActionButtons();
+  updateSelectedAccountPanel();
 }
 
 function renderAccounts(payload) {
@@ -251,7 +265,7 @@ function renderStatus(payload) {
   if (shouldRerenderAccountList) {
     renderAccountList(accountsSnapshot, { preserveScroll: true });
   } else {
-    updateActionButtons();
+    updateSelectedAccountPanel();
   }
 
   if (payload.error) {
@@ -323,7 +337,7 @@ async function startListening() {
       body: JSON.stringify({ account_id: selectedAccountId }),
     });
     renderStatus(payload);
-    const selected = accountsSnapshot.find((account) => account.id === selectedAccountId);
+    const selected = getSelectedAccount();
     hintText.textContent = selected ? `开始监听 ${selected.email}` : "开始监听";
   } catch (error) {
     hintText.textContent = error.message;
@@ -362,9 +376,27 @@ async function copyLatestCode() {
   await copyText(value, `已复制验证码 ${value}`);
 }
 
+async function copySelectedAccount() {
+  const selected = getSelectedAccount();
+  await copyText(selected?.email, selected ? `已复制账号 ${selected.email}` : "没有已选账号");
+}
+
+async function copySelectedPassword() {
+  const selected = getSelectedAccount();
+  await copyText(selected?.password, selected ? `已复制 ${selected.email} 的密码` : "没有已选账号");
+}
+
+function togglePasswordVisibility() {
+  passwordVisible = !passwordVisible;
+  updateSelectedAccountPanel();
+}
+
 startButton.addEventListener("click", startListening);
 stopButton.addEventListener("click", stopListening);
 copyButton.addEventListener("click", copyLatestCode);
+copyAccountButton.addEventListener("click", copySelectedAccount);
+copyPasswordButton.addEventListener("click", copySelectedPassword);
+togglePasswordButton.addEventListener("click", togglePasswordVisibility);
 document.addEventListener("visibilitychange", () => scheduleRefresh(100));
 
 loadAccounts();

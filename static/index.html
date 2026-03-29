@@ -14,7 +14,7 @@
           <div>
             <p class="brand-kicker">Sub2API Style Local Tool</p>
             <h1>Outlook 自动接码控制台</h1>
-            <p class="brand-subtitle">单账号监听，本机运行，选择账号后开始监听最新验证码。</p>
+            <p class="brand-subtitle">左侧只负责选择账号，右侧展示选中账号详情、监听状态和最新验证码。</p>
           </div>
         </div>
 
@@ -51,8 +51,8 @@
           <section class="hero card">
             <div class="hero-main">
               <p class="panel-kicker">Latest OTP</p>
-              <h2 class="hero-title">当前账号的最新验证码会显示在这里</h2>
-              <p class="hero-copy">界面保持单账号监听。左侧选中账号，点击开始后，页面会自动轮询并更新最新结果。</p>
+              <h2 class="hero-title">最新验证码会显示在这里</h2>
+              <p class="hero-copy">选择左侧账号后，点击开始监听。切换账号时不需要先手动停止，系统会自动切换监听对象。</p>
               <div class="code-row">
                 <div id="latestCode" class="code-value">------</div>
                 <button id="copyButton" class="btn btn-ghost" type="button">复制验证码</button>
@@ -61,9 +61,22 @@
             </div>
             <div class="hero-side">
               <div class="hero-side-card">
-                <span class="detail-label">当前账号</span>
-                <strong id="accountText">-</strong>
+                <span class="detail-label">已选账号</span>
+                <strong id="selectedAccountText">-</strong>
+                <p id="selectedAccountMeta" class="hero-side-meta">当前监听账号: -</p>
+
+                <div class="selected-secret">
+                  <span class="detail-label">密码</span>
+                  <code id="selectedPasswordText">******</code>
+                </div>
+
+                <div class="selected-secret-actions">
+                  <button id="copyAccountButton" class="btn btn-ghost" type="button">复制账号</button>
+                  <button id="togglePasswordButton" class="btn btn-ghost" type="button">显示密码</button>
+                  <button id="copyPasswordButton" class="btn btn-ghost" type="button">复制密码</button>
+                </div>
               </div>
+
               <div class="hero-actions">
                 <button id="startButton" class="btn btn-primary" type="button">开始监听</button>
                 <button id="stopButton" class="btn btn-secondary" type="button">停止</button>
@@ -72,6 +85,10 @@
           </section>
 
           <section class="details-grid">
+            <article class="detail-card card">
+              <span class="detail-label">当前监听账号</span>
+              <strong id="accountText">-</strong>
+            </article>
             <article class="detail-card card">
               <span class="detail-label">发件人</span>
               <strong id="fromText">-</strong>
