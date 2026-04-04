@@ -1,5 +1,7 @@
 ﻿from email.mime.text import MIMEText
+import json
 from pathlib import Path
+import subprocess
 import tempfile
 import threading
 import time
@@ -236,6 +238,37 @@ class ReceiverCoreTests(unittest.TestCase):
         new_release.set()
         service.stop()
 
+    def test_start_same_account_while_already_listening_is_a_noop(self):
+        account = receiver_core.OutlookAccount(
+            email="alpha@example.com",
+            password="pw",
+            client_id="cid",
+            refresh_token="rt",
+        )
+        service = receiver_core.OutlookReceiverService([account], poll_interval=0.01)
+        entered_first = threading.Event()
+        release_first = threading.Event()
+        second_called = {"value": False}
+
+        def first_poll(_account, _stop_event):
+            entered_first.set()
+            release_first.wait(timeout=1)
+            return None
+
+        def second_poll(_account, _stop_event):
+            second_called["value"] = True
+            return None
+
+        started = service.start(0, poller=first_poll)
+        self.assertTrue(entered_first.wait(timeout=1))
+        repeated = service.start(0, poller=second_poll)
+        release_first.set()
+        service.stop()
+
+        self.assertEqual(started["state"], "listening")
+        self.assertEqual(repeated["state"], "listening")
+        self.assertFalse(second_called["value"])
+
     def test_poll_outlook_account_prefers_inbox_before_junk_for_new_mail(self):
         account = receiver_core.OutlookAccount(
             email="alpha@example.com",
@@ -287,6 +320,13 @@ class WebUiAppTests(unittest.TestCase):
 
         self.assertEqual(resolved, BASE_DIR / "outlook_accounts.txt")
 
+    def test_resolve_groups_file_defaults_to_accounts_sibling_file(self):
+        from app import resolve_groups_file
+
+        resolved = resolve_groups_file(Path("E:/tmp/outlook_accounts.txt"))
+
+        self.assertEqual(resolved, Path("E:/tmp/account_groups.json"))
+
     def test_http_handler_returns_account_list_json(self):
         account = receiver_core.OutlookAccount(
             email="alpha@example.com",
@@ -309,6 +349,530 @@ class WebUiAppTests(unittest.TestCase):
         self.assertEqual(payload["accounts"][0]["password"], "pw")
 
 
+    def test_http_handler_groups_accounts_in_batches_of_five(self):
+        accounts = [
+            receiver_core.OutlookAccount(
+                email=f"user{index}@example.com",
+                password=f"pw{index}",
+                client_id=f"cid{index}",
+                refresh_token=f"rt{index}",
+            )
+            for index in range(11)
+        ]
+        service = receiver_core.OutlookReceiverService(accounts)
+
+        from app import WebUiApp
+
+        payload = WebUiApp(service).api_accounts()
+
+        self.assertEqual([group["group_index"] for group in payload["account_groups"]], [1, 2, 3])
+        self.assertEqual([group["label"] for group in payload["account_groups"]], ["第 1 组", "第 2 组", "第 3 组"])
+        self.assertEqual([len(group["accounts"]) for group in payload["account_groups"]], [5, 5, 1])
+        self.assertEqual(
+            [account["id"] for account in payload["account_groups"][1]["accounts"]],
+            [6, 7, 8, 9, 10],
+        )
+
+    def test_api_accounts_creates_default_persisted_groups_with_mother_child_tags(self):
+        accounts = [
+            receiver_core.OutlookAccount(
+                email=f"user{index}@example.com",
+                password=f"pw{index}",
+                client_id=f"cid{index}",
+                refresh_token=f"rt{index}",
+            )
+            for index in range(6)
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            accounts_file = Path(tmpdir) / "outlook_accounts.txt"
+            accounts_file.write_text("placeholder", encoding="utf-8")
+            groups_file = Path(tmpdir) / "account_groups.json"
+
+            from app import WebUiApp
+
+            payload = WebUiApp(
+                receiver_core.OutlookReceiverService(accounts),
+                accounts_file=accounts_file,
+                groups_file=groups_file,
+            ).api_accounts()
+
+            self.assertTrue(groups_file.is_file())
+            self.assertEqual(payload["groups_file"], str(groups_file))
+            self.assertEqual(payload["group_count"], 2)
+            self.assertEqual(
+                [account["tag"] for account in payload["account_groups"][0]["accounts"]],
+                ["unmarked", "unmarked", "unmarked", "unmarked", "unmarked"],
+            )
+            self.assertEqual(payload["account_groups"][1]["accounts"][0]["tag"], "unmarked")
+
+    def test_api_accounts_uses_saved_group_config_for_order_name_and_tags(self):
+        accounts = [
+            receiver_core.OutlookAccount(
+                email="alpha@example.com",
+                password="pw1",
+                client_id="cid1",
+                refresh_token="rt1",
+            ),
+            receiver_core.OutlookAccount(
+                email="beta@example.com",
+                password="pw2",
+                client_id="cid2",
+                refresh_token="rt2",
+            ),
+            receiver_core.OutlookAccount(
+                email="gamma@example.com",
+                password="pw3",
+                client_id="cid3",
+                refresh_token="rt3",
+            ),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            accounts_file = Path(tmpdir) / "outlook_accounts.txt"
+            accounts_file.write_text("placeholder", encoding="utf-8")
+            groups_file = Path(tmpdir) / "account_groups.json"
+            groups_file.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "groups": [
+                            {
+                                "id": "vip",
+                                "name": "VIP 组",
+                                "accounts": [
+                                    {"email": "gamma@example.com", "tag": "mother", "note": "主账号"},
+                                    {"email": "alpha@example.com", "tag": "unmarked", "note": ""},
+                                ],
+                            },
+                            {
+                                "id": "spare",
+                                "name": "备用组",
+                                "accounts": [
+                                    {"email": "beta@example.com", "tag": "banned", "note": "已封"},
+                                ],
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            from app import WebUiApp
+
+            payload = WebUiApp(
+                receiver_core.OutlookReceiverService(accounts),
+                accounts_file=accounts_file,
+                groups_file=groups_file,
+            ).api_accounts()
+
+            self.assertEqual([group["id"] for group in payload["account_groups"]], ["vip", "spare"])
+            self.assertEqual(payload["account_groups"][0]["name"], "VIP 组")
+            self.assertEqual(
+                [account["email"] for account in payload["account_groups"][0]["accounts"]],
+                ["gamma@example.com", "alpha@example.com"],
+            )
+            self.assertEqual(payload["account_groups"][0]["accounts"][0]["tag"], "mother")
+            self.assertEqual(payload["account_groups"][0]["accounts"][0]["note"], "主账号")
+            self.assertEqual(payload["account_groups"][0]["accounts"][1]["tag"], "unmarked")
+            self.assertEqual(payload["account_groups"][1]["accounts"][0]["tag"], "banned")
+
+    def test_api_accounts_drops_stale_groups_with_missing_accounts(self):
+        accounts = [
+            receiver_core.OutlookAccount(
+                email="alpha@example.com",
+                password="pw1",
+                client_id="cid1",
+                refresh_token="rt1",
+            ),
+            receiver_core.OutlookAccount(
+                email="beta@example.com",
+                password="pw2",
+                client_id="cid2",
+                refresh_token="rt2",
+            ),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            accounts_file = Path(tmpdir) / "outlook_accounts.txt"
+            accounts_file.write_text("placeholder", encoding="utf-8")
+            groups_file = Path(tmpdir) / "account_groups.json"
+            groups_file.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "groups": [
+                            {
+                                "id": "stale",
+                                "name": "旧分组",
+                                "accounts": [
+                                    {"email": "missing@example.com", "tag": "mother", "note": ""},
+                                ],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            from app import WebUiApp
+
+            payload = WebUiApp(
+                receiver_core.OutlookReceiverService(accounts),
+                accounts_file=accounts_file,
+                groups_file=groups_file,
+            ).api_accounts()
+
+            self.assertEqual([group["id"] for group in payload["account_groups"]], ["group-1"])
+            self.assertEqual(
+                [account["email"] for account in payload["account_groups"][0]["accounts"]],
+                ["alpha@example.com", "beta@example.com"],
+            )
+
+    def test_api_accounts_migrates_legacy_default_mother_child_tags_to_unmarked(self):
+        accounts = [
+            receiver_core.OutlookAccount(
+                email=f"user{index}@example.com",
+                password=f"pw{index}",
+                client_id=f"cid{index}",
+                refresh_token=f"rt{index}",
+            )
+            for index in range(5)
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            accounts_file = Path(tmpdir) / "outlook_accounts.txt"
+            accounts_file.write_text("placeholder", encoding="utf-8")
+            groups_file = Path(tmpdir) / "account_groups.json"
+            groups_file.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "groups": [
+                            {
+                                "id": "group-1",
+                                "name": "第 1 组",
+                                "accounts": [
+                                    {"email": "user0@example.com", "tag": "mother"},
+                                    {"email": "user1@example.com", "tag": "child"},
+                                    {"email": "user2@example.com", "tag": "child"},
+                                    {"email": "user3@example.com", "tag": "child"},
+                                    {"email": "user4@example.com", "tag": "child"},
+                                ],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            from app import WebUiApp
+
+            payload = WebUiApp(
+                receiver_core.OutlookReceiverService(accounts),
+                accounts_file=accounts_file,
+                groups_file=groups_file,
+            ).api_accounts()
+
+            self.assertEqual(
+                [account["tag"] for account in payload["account_groups"][0]["accounts"]],
+                ["unmarked", "unmarked", "unmarked", "unmarked", "unmarked"],
+            )
+
+    def test_api_save_groups_persists_custom_grouping(self):
+        accounts = [
+            receiver_core.OutlookAccount(
+                email="alpha@example.com",
+                password="pw1",
+                client_id="cid1",
+                refresh_token="rt1",
+            ),
+            receiver_core.OutlookAccount(
+                email="beta@example.com",
+                password="pw2",
+                client_id="cid2",
+                refresh_token="rt2",
+            ),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            accounts_file = Path(tmpdir) / "outlook_accounts.txt"
+            accounts_file.write_text("placeholder", encoding="utf-8")
+            groups_file = Path(tmpdir) / "account_groups.json"
+
+            from app import WebUiApp
+
+            webui = WebUiApp(
+                receiver_core.OutlookReceiverService(accounts),
+                accounts_file=accounts_file,
+                groups_file=groups_file,
+            )
+            payload = webui.api_save_groups(
+                {
+                    "groups": [
+                        {
+                            "id": "solo",
+                            "name": "单独监听",
+                            "accounts": [
+                                {"email": "beta@example.com", "tag": "mother", "note": "主接码"},
+                            ],
+                        },
+                        {
+                            "id": "holding",
+                            "name": "待整理",
+                            "accounts": [
+                                {"email": "alpha@example.com", "tag": "unmarked", "note": "待整理"},
+                            ],
+                        },
+                    ]
+                }
+            )
+
+            stored = json.loads(groups_file.read_text(encoding="utf-8"))
+            self.assertEqual([group["id"] for group in stored["groups"]], ["solo", "holding"])
+            self.assertEqual(stored["groups"][0]["accounts"][0]["email"], "beta@example.com")
+            self.assertEqual(stored["groups"][0]["accounts"][0]["tag"], "mother")
+            self.assertEqual(stored["groups"][0]["accounts"][0]["note"], "主接码")
+            self.assertEqual(payload["account_groups"][0]["name"], "单独监听")
+            self.assertEqual(payload["account_groups"][0]["accounts"][0]["email"], "beta@example.com")
+            self.assertEqual(payload["account_groups"][1]["accounts"][0]["note"], "待整理")
+
+    def test_api_save_groups_stops_active_listener_when_account_becomes_banned(self):
+        account = receiver_core.OutlookAccount(
+            email="alpha@example.com",
+            password="pw",
+            client_id="cid",
+            refresh_token="rt",
+        )
+        service = receiver_core.OutlookReceiverService([account], poll_interval=0.01)
+        entered_poll = threading.Event()
+        release_poll = threading.Event()
+
+        def blocking_poll(_account, _stop_event):
+            entered_poll.set()
+            release_poll.wait(timeout=1)
+            return None
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            accounts_file = Path(tmpdir) / "outlook_accounts.txt"
+            accounts_file.write_text("placeholder", encoding="utf-8")
+            groups_file = Path(tmpdir) / "account_groups.json"
+
+            from app import WebUiApp
+
+            webui = WebUiApp(service, accounts_file=accounts_file, groups_file=groups_file)
+            service.start(0, poller=blocking_poll)
+            self.assertTrue(entered_poll.wait(timeout=1))
+
+            webui.api_save_groups(
+                {
+                    "groups": [
+                        {
+                            "id": "group-1",
+                            "name": "第 1 组",
+                            "accounts": [
+                                {"email": "alpha@example.com", "tag": "banned", "note": ""},
+                            ],
+                        }
+                    ]
+                }
+            )
+
+            release_poll.set()
+            status = service.status()
+
+            self.assertEqual(status["state"], "stopped")
+
+    def test_api_start_rejects_banned_accounts(self):
+        account = receiver_core.OutlookAccount(
+            email="alpha@example.com",
+            password="pw",
+            client_id="cid",
+            refresh_token="rt",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            accounts_file = Path(tmpdir) / "outlook_accounts.txt"
+            accounts_file.write_text("placeholder", encoding="utf-8")
+            groups_file = Path(tmpdir) / "account_groups.json"
+            groups_file.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "groups": [
+                            {
+                                "id": "group-1",
+                                "name": "第 1 组",
+                                "accounts": [
+                                    {"email": "alpha@example.com", "tag": "banned", "note": ""},
+                                ],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            from app import WebUiApp
+
+            webui = WebUiApp(
+                receiver_core.OutlookReceiverService([account]),
+                accounts_file=accounts_file,
+                groups_file=groups_file,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "banned"):
+                webui.api_start(1)
+
+    def test_ready_count_excludes_banned_accounts(self):
+        accounts = [
+            receiver_core.OutlookAccount(
+                email="alpha@example.com",
+                password="pw1",
+                client_id="cid1",
+                refresh_token="rt1",
+            ),
+            receiver_core.OutlookAccount(
+                email="beta@example.com",
+                password="pw2",
+                client_id="cid2",
+                refresh_token="rt2",
+            ),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            accounts_file = Path(tmpdir) / "outlook_accounts.txt"
+            accounts_file.write_text("placeholder", encoding="utf-8")
+            groups_file = Path(tmpdir) / "account_groups.json"
+            groups_file.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "groups": [
+                            {
+                                "id": "group-1",
+                                "name": "第 1 组",
+                                "accounts": [
+                                    {"email": "alpha@example.com", "tag": "unmarked", "note": ""},
+                                    {"email": "beta@example.com", "tag": "banned", "note": ""},
+                                ],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            from app import WebUiApp
+
+            payload = WebUiApp(
+                receiver_core.OutlookReceiverService(accounts),
+                accounts_file=accounts_file,
+                groups_file=groups_file,
+            ).api_accounts()
+
+            self.assertEqual(payload["ready_count"], 1)
+
+    def test_public_account_ids_are_one_based(self):
+        account = receiver_core.OutlookAccount(
+            email="alpha@example.com",
+            password="pw",
+            client_id="cid",
+            refresh_token="rt",
+        )
+        from app import WebUiApp
+        payload = WebUiApp(receiver_core.OutlookReceiverService([account])).api_accounts()
+        self.assertEqual(payload["accounts"][0]["id"], 1)
+        self.assertEqual(payload["account_groups"][0]["accounts"][0]["id"], 1)
+
+    def test_account_payload_exposes_listenable_and_disabled_reason(self):
+        accounts = [
+            receiver_core.OutlookAccount(
+                email="alpha@example.com",
+                password="pw1",
+                client_id="cid1",
+                refresh_token="rt1",
+            ),
+            receiver_core.OutlookAccount(
+                email="beta@example.com",
+                password="pw2",
+                client_id="cid2",
+                refresh_token="rt2",
+            ),
+            receiver_core.OutlookAccount(email="gamma@example.com", password="pw3"),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            accounts_file = Path(tmpdir) / "outlook_accounts.txt"
+            accounts_file.write_text("placeholder", encoding="utf-8")
+            groups_file = Path(tmpdir) / "account_groups.json"
+            groups_file.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "groups": [
+                            {
+                                "id": "group-1",
+                                "name": "第 1 组",
+                                "accounts": [
+                                    {"email": "alpha@example.com", "tag": "unmarked", "note": ""},
+                                    {"email": "beta@example.com", "tag": "banned", "note": ""},
+                                    {"email": "gamma@example.com", "tag": "unmarked", "note": ""},
+                                ],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            from app import WebUiApp
+            payload = WebUiApp(
+                receiver_core.OutlookReceiverService(accounts),
+                accounts_file=accounts_file,
+                groups_file=groups_file,
+            ).api_accounts()
+
+            self.assertTrue(payload["accounts"][0]["listenable"])
+            self.assertIsNone(payload["accounts"][0]["disabled_reason"])
+            self.assertFalse(payload["accounts"][1]["listenable"])
+            self.assertEqual(payload["accounts"][1]["disabled_reason"], "banned")
+            self.assertFalse(payload["accounts"][2]["listenable"])
+            self.assertEqual(payload["accounts"][2]["disabled_reason"], "missing_credentials")
+
+    def test_status_payload_exposes_explicit_button_state_flags(self):
+        account = receiver_core.OutlookAccount(
+            email="alpha@example.com",
+            password="pw",
+            client_id="cid",
+            refresh_token="rt",
+        )
+        service = receiver_core.OutlookReceiverService([account], poll_interval=0.01)
+
+        from app import WebUiApp
+        webui = WebUiApp(service)
+        idle_payload = webui.api_status()
+        self.assertFalse(idle_payload["is_listening"])
+        self.assertFalse(idle_payload["can_stop"])
+        self.assertIsNone(idle_payload["active_account_id"])
+
+        import threading
+        gate = threading.Event()
+        started = webui.api_start(1)
+        listening_payload = webui.api_status()
+        service.stop()
+
+        self.assertEqual(started["state"], "listening")
+        self.assertTrue(listening_payload["is_listening"])
+        self.assertTrue(listening_payload["can_stop"])
+        self.assertEqual(listening_payload["active_account_id"], 1)
 if __name__ == "__main__":
     unittest.main()
+
+
+
+
+
+
+
 

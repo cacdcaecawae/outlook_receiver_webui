@@ -4,107 +4,194 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Outlook 自动接码控制台</title>
-    <link rel="stylesheet" href="/static/styles.css">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
   </head>
-  <body>
-    <main class="page">
-      <header class="topbar">
-        <div class="brand">
-          <div class="brand-mark">S2</div>
-          <div>
-            <p class="brand-kicker">Sub2API Style Local Tool</p>
-            <h1>Outlook 自动接码控制台</h1>
-            <p class="brand-subtitle">左侧只负责选择账号，右侧展示选中账号详情、监听状态和最新验证码。</p>
-          </div>
-        </div>
+  <body class="bg-slate-50 min-h-screen" x-data="app()" x-init="init()">
 
-        <div class="topbar-stats">
-          <article class="stat-chip">
-            <span>账号总数</span>
-            <strong id="totalCount">0</strong>
-          </article>
-          <article class="stat-chip">
-            <span>可用账号</span>
-            <strong id="readyCount">0</strong>
-          </article>
-          <article class="stat-chip status-chip">
-            <span>当前状态</span>
-            <strong id="stateBadge" class="state-badge idle">idle</strong>
-          </article>
-        </div>
-      </header>
-
-      <section class="layout">
-        <aside class="sidebar card">
-          <div class="panel-head">
+    <!-- 顶部导航 -->
+    <nav class="bg-white border-b border-slate-200">
+      <div class="max-w-7xl mx-auto px-6 py-4">
+        <div class="flex justify-between items-center">
+          <div class="flex items-center space-x-3">
+            <div class="w-10 h-10 bg-teal-600 rounded-lg flex items-center justify-center">
+              <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
+              </svg>
+            </div>
             <div>
-              <p class="panel-kicker">Accounts</p>
-              <h2>账号列表</h2>
+              <h1 class="text-xl font-bold text-slate-900">Outlook 接码控制台</h1>
             </div>
-            <span class="panel-badge" id="accountsCountBadge">0</span>
           </div>
-          <p id="accountsFileText" class="panel-meta">正在加载账号文件...</p>
-          <div id="accountList" class="account-list"></div>
-        </aside>
+          <span class="px-3 py-1.5 rounded-full text-xs font-semibold uppercase"
+                :class="{
+                  'bg-green-100 text-green-700': state === 'idle',
+                  'bg-yellow-100 text-yellow-700': state === 'listening',
+                  'bg-red-100 text-red-700': state === 'error'
+                }"
+                x-text="state"></span>
+        </div>
+      </div>
+    </nav>
 
-        <section class="content">
-          <section class="hero card">
-            <div class="hero-main">
-              <p class="panel-kicker">Latest OTP</p>
-              <h2 class="hero-title">最新验证码会显示在这里</h2>
-              <p class="hero-copy">选择左侧账号后，点击开始监听。切换账号时不需要先手动停止，系统会自动切换监听对象。</p>
-              <div class="code-row">
-                <div id="latestCode" class="code-value">------</div>
-                <button id="copyButton" class="btn btn-ghost" type="button">复制验证码</button>
-              </div>
-              <p id="hintText" class="hero-hint">等待开始监听</p>
+    <!-- 统计卡片 -->
+    <div class="max-w-7xl mx-auto px-6 py-6">
+      <div class="grid grid-cols-3 gap-4">
+        <div class="bg-white rounded-lg border border-slate-200 p-4">
+          <p class="text-sm text-slate-600">账号总数</p>
+          <p class="text-3xl font-bold text-slate-900 mt-1" x-text="stats.total"></p>
+        </div>
+        <div class="bg-white rounded-lg border border-slate-200 p-4">
+          <p class="text-sm text-slate-600">可用账号</p>
+          <p class="text-3xl font-bold text-green-600 mt-1" x-text="stats.ready"></p>
+        </div>
+        <div class="bg-white rounded-lg border border-slate-200 p-4">
+          <p class="text-sm text-slate-600">分组数量</p>
+          <p class="text-3xl font-bold text-purple-600 mt-1" x-text="stats.groups"></p>
+        </div>
+      </div>
+    </div>
+
+    <!-- 主内容 -->
+    <div class="max-w-7xl mx-auto px-6 pb-8">
+      <div class="grid grid-cols-12 gap-6">
+
+        <!-- 左侧：分组列表 -->
+        <div class="col-span-3">
+          <div class="bg-white rounded-lg border border-slate-200 p-4">
+            <h2 class="text-lg font-semibold text-slate-900 mb-4">分组列表</h2>
+            <div class="space-y-2 max-h-[600px] overflow-y-auto">
+              <template x-for="group in groups" :key="group.id">
+                <button @click="selectGroup(group.id)"
+                        class="w-full text-left px-4 py-3 rounded-lg border transition"
+                        :class="selectedGroupId === group.id
+                          ? 'bg-teal-50 border-teal-500'
+                          : 'bg-slate-50 border-slate-200 hover:border-slate-300'">
+                  <div class="font-medium text-slate-900" x-text="group.name"></div>
+                  <div class="text-sm text-slate-500 mt-1" x-text="group.accounts.length + ' 个账号'"></div>
+                </button>
+              </template>
             </div>
-            <div class="hero-side">
-              <div class="hero-side-card">
-                <span class="detail-label">已选账号</span>
-                <strong id="selectedAccountText">-</strong>
-                <p id="selectedAccountMeta" class="hero-side-meta">当前监听账号: -</p>
+            <div class="mt-4 pt-4 border-t border-slate-200 space-y-1 text-xs text-slate-500">
+              <p class="truncate" :title="accountsFile" x-text="'账号: ' + (accountsFile ? accountsFile.split(/[/\\]/).pop() : '-')"></p>
+              <p class="truncate" :title="groupsFile" x-text="'分组: ' + (groupsFile ? groupsFile.split(/[/\\]/).pop() : '-')"></p>
+            </div>
+          </div>
+        </div>
 
-                <div class="selected-secret">
-                  <span class="detail-label">密码</span>
-                  <code id="selectedPasswordText">******</code>
+        <!-- 中间：验证码 -->
+        <div class="col-span-5">
+          <div class="bg-white rounded-lg border border-slate-200 p-6">
+            <h2 class="text-lg font-semibold text-slate-900 mb-4">验证码操作区</h2>
+
+            <div class="bg-slate-100 rounded-lg p-8 text-center mb-4">
+              <div class="text-5xl font-mono font-bold text-slate-900 tracking-widest" x-text="latestCode || '------'"></div>
+              <p class="text-sm text-slate-600 mt-3" x-text="hintText"></p>
+              <p class="text-xs text-slate-500 mt-2" x-show="state === 'listening' && activeAccountId !== null">
+                <span>正在监听: </span>
+                <span class="font-medium" x-text="accounts.find(a => a.id === activeAccountId)?.email || '-'"></span>
+              </p>
+            </div>
+
+            <div class="grid grid-cols-2 gap-3">
+              <button @click="startListening()"
+                      :disabled="!canStart"
+                      class="px-4 py-3 bg-teal-600 hover:bg-teal-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-medium rounded-lg transition">
+                开始监听
+              </button>
+              <button @click="stopListening()"
+                      :disabled="state !== 'listening'"
+                      class="px-4 py-3 bg-slate-600 hover:bg-slate-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-medium rounded-lg transition">
+                停止
+              </button>
+              <button @click="copyCode()"
+                      class="col-span-2 px-4 py-2 bg-white hover:bg-slate-50 border border-slate-300 text-slate-700 font-medium rounded-lg transition">
+                复制验证码
+              </button>
+            </div>
+
+            <!-- 选中账号详情 -->
+            <div class="mt-6 pt-6 border-t border-slate-200" x-show="selectedAccount">
+              <div class="flex items-start justify-between mb-4">
+                <div class="flex-1 min-w-0">
+                  <h3 class="text-base font-semibold text-slate-900 truncate" x-text="selectedAccount?.email"></h3>
+                  <p class="text-sm text-slate-500 mt-1">当前选中账号</p>
+                </div>
+                <span class="px-2.5 py-1 rounded-full text-xs font-semibold"
+                      :class="getTagClass(selectedAccount?.tag)"
+                      x-text="getTagLabel(selectedAccount?.tag)"></span>
+              </div>
+
+              <div class="space-y-3">
+                <div class="bg-slate-50 rounded-lg p-3">
+                  <p class="text-xs text-slate-600 mb-1">密码</p>
+                  <code class="text-sm font-mono text-slate-900" x-text="passwordVisible ? selectedAccount?.password : '******'"></code>
                 </div>
 
-                <div class="selected-secret-actions">
-                  <button id="copyAccountButton" class="btn btn-ghost" type="button">复制账号</button>
-                  <button id="togglePasswordButton" class="btn btn-ghost" type="button">显示密码</button>
-                  <button id="copyPasswordButton" class="btn btn-ghost" type="button">复制密码</button>
+                <div class="grid grid-cols-3 gap-2">
+                  <button @click="copyAccount()" class="px-3 py-2 bg-white hover:bg-slate-50 border border-slate-300 text-slate-700 text-sm font-medium rounded-lg transition">
+                    复制账号
+                  </button>
+                  <button @click="togglePassword()" class="px-3 py-2 bg-white hover:bg-slate-50 border border-slate-300 text-slate-700 text-sm font-medium rounded-lg transition">
+                    <span x-text="passwordVisible ? '隐藏' : '显示'"></span>
+                  </button>
+                  <button @click="copyPassword()" class="px-3 py-2 bg-white hover:bg-slate-50 border border-slate-300 text-slate-700 text-sm font-medium rounded-lg transition">
+                    复制密码
+                  </button>
+                </div>
+
+                <div class="bg-slate-50 rounded-lg p-3" x-show="selectedAccount?.note">
+                  <p class="text-xs text-slate-600 mb-1">备注</p>
+                  <p class="text-sm text-slate-700" x-text="selectedAccount?.note"></p>
                 </div>
               </div>
-
-              <div class="hero-actions">
-                <button id="startButton" class="btn btn-primary" type="button">开始监听</button>
-                <button id="stopButton" class="btn btn-secondary" type="button">停止</button>
-              </div>
             </div>
-          </section>
+          </div>
+        </div>
 
-          <section class="details-grid">
-            <article class="detail-card card">
-              <span class="detail-label">当前监听账号</span>
-              <strong id="accountText">-</strong>
-            </article>
-            <article class="detail-card card">
-              <span class="detail-label">发件人</span>
-              <strong id="fromText">-</strong>
-            </article>
-            <article class="detail-card card wide">
-              <span class="detail-label">邮件主题</span>
-              <strong id="subjectText">-</strong>
-            </article>
-            <article class="detail-card card">
-              <span class="detail-label">收到时间</span>
-              <strong id="receivedAtText">-</strong>
-            </article>
-          </section>
-        </section>
-      </section>
-    </main>
+        <!-- 右侧：账号列表 -->
+        <div class="col-span-4">
+          <div class="bg-white rounded-lg border border-slate-200 p-4">
+            <div class="mb-4">
+              <h2 class="text-lg font-semibold text-slate-900" x-text="currentGroup?.name || '未选择分组'"></h2>
+              <p class="text-sm text-slate-500" x-text="(currentGroup?.accounts.length || 0) + ' 个账号'"></p>
+            </div>
+
+            <div class="space-y-2 max-h-[700px] overflow-y-auto">
+              <template x-for="account in currentGroup?.accounts || []" :key="account.id">
+                <div @click="selectAccount(account.id)"
+                     class="p-3 rounded-lg border cursor-pointer transition"
+                     :class="{
+                       'bg-teal-50 border-teal-500': selectedAccountId === account.id,
+                       'bg-yellow-50 border-yellow-500': state === 'listening' && activeAccountId === account.id && selectedAccountId !== account.id,
+                       'bg-slate-50 border-slate-200 hover:border-slate-300': selectedAccountId !== account.id && (state !== 'listening' || activeAccountId !== account.id)
+                     }">
+                  <div class="flex items-start justify-between mb-2">
+                    <p class="font-medium text-slate-900 text-sm break-all flex-1" x-text="account.email"></p>
+                    <span class="ml-2 px-2 py-0.5 rounded-full text-xs font-semibold whitespace-nowrap"
+                          :class="account.ready && account.tag !== 'banned' ? 'bg-green-100 text-green-700' : 'bg-slate-200 text-slate-600'"
+                          x-text="account.ready && account.tag !== 'banned' ? '可用' : '不可用'"></span>
+                  </div>
+                  <div class="flex items-center justify-between">
+                    <button @click.stop="cycleTag(account.email)"
+                            class="px-2 py-1 rounded-full text-xs font-semibold transition hover:opacity-80"
+                            :class="getTagClass(account.tag)"
+                            x-text="getTagLabel(account.tag)"></button>
+                    <button @click.stop="editNote(account.email)"
+                            class="px-2 py-1 bg-white hover:bg-slate-100 border border-slate-300 text-slate-700 text-xs font-medium rounded transition">
+                      编辑备注
+                    </button>
+                    <span class="text-xs font-semibold text-yellow-700" x-show="state === 'listening' && activeAccountId === account.id">监听中</span>
+                  </div>
+                  <p class="text-xs text-slate-500 mt-2" x-show="account.note" x-text="account.note"></p>
+                </div>
+              </template>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
 
     <script src="/static/app.js"></script>
   </body>

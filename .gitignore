@@ -2,3 +2,7 @@
 __pycache__/
 *.pyc
 outlook_accounts.txt
+
+account_groups.json
+.omx/
+pw-*.png

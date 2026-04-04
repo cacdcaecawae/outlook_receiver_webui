@@ -303,6 +303,15 @@ class OutlookReceiverService:
         if not account.ready:
             raise RuntimeError("Selected account is missing client_id or refresh_token")
 
+        with self._lock:
+            if (
+                self._status.get("state") == "listening"
+                and self._status.get("selected_index") == account_index
+                and self._thread is not None
+                and self._thread.is_alive()
+            ):
+                return dict(self._status)
+
         self._stop_current_listener(mark_stopped=False)
         stop_event = threading.Event()
         effective_poller = poller or (lambda selected, event: poll_outlook_account(selected, event, self._poll_interval))
@@ -381,4 +390,5 @@ class OutlookReceiverService:
     def status(self) -> dict[str, Any]:
         with self._lock:
             return dict(self._status)
+
 
