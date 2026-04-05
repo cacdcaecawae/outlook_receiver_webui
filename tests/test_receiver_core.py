@@ -399,9 +399,14 @@ class WebUiAppTests(unittest.TestCase):
         ]
         service = receiver_core.OutlookReceiverService(accounts)
 
-        from app import WebUiApp
+        with tempfile.TemporaryDirectory() as tmpdir:
+            accounts_file = Path(tmpdir) / "outlook_accounts.txt"
+            accounts_file.write_text("placeholder", encoding="utf-8")
+            groups_file = Path(tmpdir) / "account_groups.json"
 
-        payload = WebUiApp(service).api_accounts()
+            from app import WebUiApp
+
+            payload = WebUiApp(service, accounts_file=accounts_file, groups_file=groups_file).api_accounts()
 
         self.assertEqual([group["group_index"] for group in payload["account_groups"]], [1, 2, 3])
         self.assertEqual([group["label"] for group in payload["account_groups"]], ["第 1 组", "第 2 组", "第 3 组"])
@@ -675,6 +680,51 @@ class WebUiAppTests(unittest.TestCase):
             self.assertEqual(payload["account_groups"][0]["accounts"][0]["email"], "beta@example.com")
             self.assertEqual(payload["account_groups"][1]["accounts"][0]["note"], "待整理")
 
+    def test_api_save_groups_preserves_empty_custom_groups(self):
+        accounts = [
+            receiver_core.OutlookAccount(
+                email="alpha@example.com",
+                password="pw1",
+                client_id="cid1",
+                refresh_token="rt1",
+            ),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            accounts_file = Path(tmpdir) / "outlook_accounts.txt"
+            accounts_file.write_text("placeholder", encoding="utf-8")
+            groups_file = Path(tmpdir) / "account_groups.json"
+
+            from app import WebUiApp
+
+            webui = WebUiApp(
+                receiver_core.OutlookReceiverService(accounts),
+                accounts_file=accounts_file,
+                groups_file=groups_file,
+            )
+            payload = webui.api_save_groups(
+                {
+                    "groups": [
+                        {
+                            "id": "staging",
+                            "name": "待整理",
+                            "accounts": [],
+                        },
+                        {
+                            "id": "active",
+                            "name": "监听中",
+                            "accounts": [
+                                {"email": "alpha@example.com", "tag": "unmarked", "note": ""},
+                            ],
+                        },
+                    ]
+                }
+            )
+
+            self.assertEqual([group["id"] for group in payload["account_groups"]], ["staging", "active"])
+            self.assertEqual(payload["account_groups"][0]["name"], "待整理")
+            self.assertEqual(payload["account_groups"][0]["count"], 0)
+
     def test_api_save_groups_stops_active_listener_when_account_becomes_banned(self):
         account = receiver_core.OutlookAccount(
             email="alpha@example.com",
@@ -820,10 +870,21 @@ class WebUiAppTests(unittest.TestCase):
             client_id="cid",
             refresh_token="rt",
         )
-        from app import WebUiApp
-        payload = WebUiApp(receiver_core.OutlookReceiverService([account])).api_accounts()
-        self.assertEqual(payload["accounts"][0]["id"], 1)
-        self.assertEqual(payload["account_groups"][0]["accounts"][0]["id"], 1)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            accounts_file = Path(tmpdir) / "outlook_accounts.txt"
+            accounts_file.write_text("placeholder", encoding="utf-8")
+            groups_file = Path(tmpdir) / "account_groups.json"
+
+            from app import WebUiApp
+
+            payload = WebUiApp(
+                receiver_core.OutlookReceiverService([account]),
+                accounts_file=accounts_file,
+                groups_file=groups_file,
+            ).api_accounts()
+
+            self.assertEqual(payload["accounts"][0]["id"], 1)
+            self.assertEqual(payload["account_groups"][0]["accounts"][0]["id"], 1)
 
     def test_account_payload_exposes_listenable_and_disabled_reason(self):
         accounts = [

@@ -9,7 +9,7 @@
   </head>
   <body class="min-h-screen bg-slate-50" x-data="app()" x-init="init()">
     <nav class="border-b border-slate-200 bg-white">
-      <div class="mx-auto flex max-w-7xl items-center justify-between px-6 py-4">
+      <div class="mx-auto max-w-7xl px-6 py-4 lg:grid lg:grid-cols-[auto_minmax(280px,1fr)_auto] lg:items-center lg:gap-4">
         <div class="flex items-center gap-3">
           <div class="flex h-10 w-10 items-center justify-center rounded-lg bg-teal-600">
             <svg class="h-6 w-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -21,7 +21,52 @@
           </div>
         </div>
 
-        <div class="flex items-center gap-2">
+        <div class="mt-4 flex items-center gap-3 lg:mt-0 lg:justify-center">
+          <div class="relative w-full max-w-xl" @click.outside="searchFocused = false">
+            <input x-model="searchQuery"
+                   @input="handleSearchInput()"
+                   @focus="searchFocused = true"
+                   @keydown.enter.prevent="searchResults[0] && selectSearchResult(searchResults[0])"
+                   @keydown.escape.prevent="clearSearch()"
+                   type="text"
+                   placeholder="搜索账号"
+                   class="w-full rounded-xl border border-slate-300 bg-slate-50 px-4 py-2.5 text-sm text-slate-900 outline-none transition focus:border-teal-500 focus:bg-white">
+            <button x-show="searchQuery"
+                    @click="clearSearch()"
+                    class="absolute right-2 top-1/2 -translate-y-1/2 rounded-md px-2 py-1 text-xs text-slate-500 transition hover:bg-slate-200">
+              清空
+            </button>
+
+            <div x-show="showSearchResults"
+                 x-cloak
+                 class="absolute left-0 right-0 top-[calc(100%+8px)] z-20 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl">
+              <template x-for="account in searchResults" :key="account.id">
+                <button @mousedown.prevent="selectSearchResult(account)"
+                        class="flex w-full items-center justify-between gap-3 border-b border-slate-100 px-4 py-3 text-left transition last:border-b-0 hover:bg-slate-50">
+                  <div class="min-w-0">
+                    <p class="truncate text-sm font-medium text-slate-900" x-text="account.email"></p>
+                    <p class="mt-1 truncate text-xs text-slate-500" x-text="account.group_name || '未分组'"></p>
+                  </div>
+                  <span class="rounded-full px-2 py-1 text-xs font-semibold"
+                        :class="getTagClass(account.tag)"
+                        x-text="getTagLabel(account.tag)"></span>
+                </button>
+              </template>
+            </div>
+
+            <div x-show="showEmptySearchResults"
+                 x-cloak
+                 class="absolute left-0 right-0 top-[calc(100%+8px)] z-20 rounded-xl border border-slate-200 bg-white px-4 py-4 text-sm text-slate-500 shadow-xl">
+              没有搜索到账号
+            </div>
+          </div>
+          <button @click="createGroup()"
+                  class="shrink-0 rounded-xl bg-teal-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-teal-700">
+            新建分组
+          </button>
+        </div>
+
+        <div class="mt-4 flex items-center justify-end gap-2 lg:mt-0">
           <span class="rounded-full px-3 py-1.5 text-xs font-semibold"
                 :class="streamClass"
                 x-text="streamLabel"></span>
@@ -38,7 +83,7 @@
     </nav>
 
     <div class="mx-auto max-w-7xl px-6 py-6">
-      <div class="grid grid-cols-3 gap-4">
+      <div class="grid grid-cols-1 gap-4 md:grid-cols-3">
         <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
           <p class="text-sm text-slate-500">账号总数</p>
           <p class="mt-2 text-3xl font-bold text-slate-900" x-text="stats.total"></p>
@@ -55,25 +100,49 @@
     </div>
 
     <div class="mx-auto max-w-7xl px-6 pb-8">
-      <div class="grid grid-cols-12 gap-6">
-        <div class="col-span-3">
+      <div class="grid grid-cols-1 gap-6 xl:grid-cols-12">
+        <div class="xl:col-span-3">
           <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
             <div class="mb-4 flex items-center justify-between">
               <h2 class="text-lg font-semibold text-slate-900">分组</h2>
-              <span class="text-xs text-slate-500" x-text="stats.groups + ' 组'"></span>
+              <span class="text-xs text-slate-500" x-text="visibleGroups.length + ' 组'"></span>
             </div>
 
             <div class="max-h-[600px] space-y-2 overflow-y-auto pr-1">
-              <template x-for="group in groups" :key="group.id">
-                <button @click="selectGroup(group.id)"
-                        class="w-full rounded-lg border px-4 py-3 text-left transition"
-                        :class="selectedGroupId === group.id
-                          ? 'border-teal-500 bg-teal-50'
-                          : 'border-slate-200 bg-slate-50 hover:border-slate-300'">
-                  <div class="font-medium text-slate-900" x-text="group.name"></div>
-                  <div class="mt-1 text-sm text-slate-500" x-text="group.accounts.length + ' 个账号'"></div>
-                </button>
+              <template x-for="group in visibleGroups" :key="group.id">
+                <div @dragover="allowGroupDrop(group.id, $event)"
+                     @dragleave="leaveGroupDrop(group.id)"
+                     @drop="handleGroupDrop(group.id, $event)"
+                     class="rounded-lg border transition"
+                     :class="{
+                       'border-teal-500 bg-teal-50': selectedGroupId === group.id,
+                       'border-sky-500 bg-sky-50': dragOverGroupId === group.id,
+                       'border-slate-200 bg-slate-50 hover:border-slate-300': selectedGroupId !== group.id && dragOverGroupId !== group.id
+                     }">
+                  <div class="flex items-start justify-between gap-3 px-4 py-3">
+                    <button @click="selectGroup(group.id)"
+                            class="min-w-0 flex-1 text-left">
+                      <div class="truncate font-medium text-slate-900" x-text="group.name"></div>
+                      <div class="mt-1 text-sm text-slate-500" x-text="group.accounts.length + ' 个账号'"></div>
+                    </button>
+                    <div class="flex shrink-0 items-center gap-1">
+                      <button @click.stop="renameGroup(group.id)"
+                              class="rounded-md px-2 py-1 text-xs text-slate-500 transition hover:bg-white hover:text-slate-900">
+                        改名
+                      </button>
+                      <button @click.stop="deleteGroup(group.id)"
+                              class="rounded-md px-2 py-1 text-xs text-rose-500 transition hover:bg-white hover:text-rose-600">
+                        删除
+                      </button>
+                    </div>
+                  </div>
+                </div>
               </template>
+
+              <div x-show="!visibleGroups.length"
+                   class="rounded-lg border border-dashed border-slate-300 px-4 py-6 text-center text-sm text-slate-500">
+                没有匹配账号
+              </div>
             </div>
 
             <div class="mt-4 space-y-1 border-t border-slate-200 pt-4 text-xs text-slate-500">
@@ -83,7 +152,7 @@
           </div>
         </div>
 
-        <div class="col-span-5">
+        <div class="xl:col-span-5">
           <div class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
             <div class="mb-4 flex items-start justify-between gap-4">
               <div>
@@ -174,27 +243,44 @@
           </div>
         </div>
 
-        <div class="col-span-4">
+        <div class="xl:col-span-4">
           <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-            <div class="mb-4">
-              <h2 class="text-lg font-semibold text-slate-900" x-text="currentGroup?.name || '未选择分组'"></h2>
-              <p class="text-sm text-slate-500" x-text="(currentGroup?.accounts.length || 0) + ' 个账号'"></p>
+            <div class="mb-4 flex items-center justify-between">
+              <div>
+                <h2 class="text-lg font-semibold text-slate-900" x-text="currentGroup?.name || '未选择分组'"></h2>
+                <p class="text-sm text-slate-500" x-text="displayedAccounts.length + ' 个账号'"></p>
+              </div>
+              <span x-show="searchQuery"
+                    class="rounded-full bg-slate-100 px-2 py-1 text-xs text-slate-600">
+                搜索中
+              </span>
             </div>
 
             <div class="max-h-[700px] space-y-3 overflow-y-auto pr-1">
-              <template x-for="account in currentGroup?.accounts || []" :key="account.id">
+              <template x-for="account in displayedAccounts" :key="account.id">
                 <div @click="selectAccount(account.id)"
-                     class="rounded-xl border p-3 transition"
+                     @dragstart="beginAccountDrag(account.email, $event)"
+                     @dragend="endAccountDrag()"
+                     draggable="true"
+                     :data-account-id="account.id"
+                     class="cursor-move rounded-xl border p-3 transition"
                      :class="{
                        'border-teal-500 bg-teal-50': selectedAccountId === account.id,
                        'border-yellow-500 bg-yellow-50': state === 'listening' && activeAccountId === account.id && selectedAccountId !== account.id,
                        'border-slate-200 bg-slate-50 hover:border-slate-300': selectedAccountId !== account.id && (state !== 'listening' || activeAccountId !== account.id)
                      }">
                   <div class="mb-3 flex items-start justify-between gap-3">
-                    <p class="min-w-0 flex-1 break-all text-sm font-medium text-slate-900" x-text="account.email"></p>
-                    <span class="whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-semibold"
-                          :class="account.ready && account.tag !== 'banned' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-600'"
-                          x-text="account.ready && account.tag !== 'banned' ? '可用' : '不可用'"></span>
+                    <div class="min-w-0 flex-1">
+                      <p class="break-all text-sm font-medium text-slate-900" x-text="account.email"></p>
+                    </div>
+                    <div class="flex items-center gap-2">
+                      <span class="whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-semibold"
+                            :class="account.ready && account.tag !== 'banned' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-600'"
+                            x-text="account.ready && account.tag !== 'banned' ? '可用' : '不可用'"></span>
+                      <span class="rounded-full bg-white px-2 py-0.5 text-[11px] font-medium text-slate-500 ring-1 ring-slate-200">
+                        拖拽
+                      </span>
+                    </div>
                   </div>
 
                   <div class="flex flex-wrap items-center gap-2">
@@ -225,6 +311,11 @@
                   <p class="mt-2 text-xs text-slate-500" x-show="account.note" x-text="account.note"></p>
                 </div>
               </template>
+
+              <div x-show="currentGroup && !displayedAccounts.length"
+                   class="rounded-lg border border-dashed border-slate-300 px-4 py-8 text-center text-sm text-slate-500">
+                当前分组没有账号
+              </div>
             </div>
           </div>
         </div>

@@ -10,6 +10,10 @@ function app() {
     accounts: [],
     accountsFile: "",
     groupsFile: "",
+    searchQuery: "",
+    searchFocused: false,
+    draggedEmail: "",
+    dragOverGroupId: "",
 
     latestCode: "",
     latestSubject: "",
@@ -29,7 +33,6 @@ function app() {
     pollTimer: null,
     groupsSaveTimer: null,
     pendingSaveToken: 0,
-    saveInFlight: false,
     lastHandledMailEventId: 0,
     titleTimer: null,
     audioContext: null,
@@ -54,8 +57,43 @@ function app() {
       this.startEventStream();
     },
 
+    get normalizedSearch() {
+      return this.searchQuery.trim().toLowerCase();
+    },
+
+    get visibleGroups() {
+      return this.groups;
+    },
+
+    get searchResults() {
+      const query = this.normalizedSearch;
+      if (!query) {
+        return [];
+      }
+
+      return this.accounts
+        .filter((account) => this.accountMatchesSearch(account))
+        .slice(0, 8);
+    },
+
+    get showSearchResults() {
+      return this.searchFocused && this.searchResults.length > 0;
+    },
+
+    get showEmptySearchResults() {
+      return this.searchFocused && !!this.normalizedSearch && this.searchResults.length === 0;
+    },
+
     get currentGroup() {
-      return this.groups.find((group) => group.id === this.selectedGroupId) || null;
+      const visibleGroups = this.visibleGroups;
+      if (!visibleGroups.length) {
+        return null;
+      }
+      return visibleGroups.find((group) => group.id === this.selectedGroupId) || visibleGroups[0];
+    },
+
+    get displayedAccounts() {
+      return this.currentGroup?.accounts || [];
     },
 
     get selectedAccount() {
@@ -78,10 +116,10 @@ function app() {
     get streamLabel() {
       const labels = {
         idle: "未连接",
-        connecting: "实时推送连接中",
-        connected: "实时推送已连接",
-        reconnecting: "实时推送重连中",
-        fallback: "轮询模式",
+        connecting: "连接中",
+        connected: "推送",
+        reconnecting: "重连中",
+        fallback: "轮询",
       };
       return labels[this.streamState] || labels.idle;
     },
@@ -101,6 +139,22 @@ function app() {
       return [this.latestFrom, this.latestSubject, this.latestFolder, this.latestReceivedAt]
         .filter(Boolean)
         .join(" · ");
+    },
+
+    accountMatchesSearch(account) {
+      const query = this.normalizedSearch;
+      if (!query) {
+        return true;
+      }
+
+      return [
+        account.email,
+        account.note,
+        account.group_name,
+        this.getTagLabel(account.tag),
+      ]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(query));
     },
 
     async request(path, options = {}) {
@@ -331,15 +385,43 @@ function app() {
       this.stats.groups = this.groups.length;
     },
 
+    handleSearchInput() {
+      this.searchFocused = true;
+    },
+
+    clearSearch() {
+      this.searchQuery = "";
+      this.searchFocused = false;
+    },
+
+    selectSearchResult(account) {
+      this.searchQuery = "";
+      this.searchFocused = false;
+      this.selectedGroupId = account.group_id;
+      this.selectedAccountId = account.id;
+      this.passwordVisible = false;
+      this.scrollAccountIntoView(account.id);
+    },
+
+    scrollAccountIntoView(accountId) {
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => {
+          const target = document.querySelector(`[data-account-id="${accountId}"]`);
+          target?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        });
+      });
+    },
+
     ensureSelection() {
-      if (!this.groups.length) {
+      const visibleGroups = this.visibleGroups;
+      if (!visibleGroups.length) {
         this.selectedGroupId = "";
         this.selectedAccountId = null;
         return;
       }
 
-      if (!this.selectedGroupId || !this.groups.find((group) => group.id === this.selectedGroupId)) {
-        this.selectedGroupId = this.groups[0].id;
+      if (!this.selectedGroupId || !visibleGroups.find((group) => group.id === this.selectedGroupId)) {
+        this.selectedGroupId = visibleGroups[0].id;
       }
 
       const group = this.currentGroup;
@@ -500,6 +582,178 @@ function app() {
       this.queueGroupsSave("备注已保存");
     },
 
+    createGroup() {
+      const name = (window.prompt("请输入新分组名称", "") || "").trim();
+      if (!name) {
+        return;
+      }
+
+      const groupId = this.buildGroupId(name);
+      this.groups.push({
+        id: groupId,
+        name,
+        label: name,
+        group_index: this.groups.length + 1,
+        count: 0,
+        accounts: [],
+      });
+      this.searchQuery = "";
+      this.updateStats();
+      this.selectGroup(groupId);
+      this.queueGroupsSave(`已创建分组 ${name}`, { immediate: true });
+    },
+
+    renameGroup(groupId) {
+      const group = this.groups.find((entry) => entry.id === groupId);
+      if (!group) {
+        return;
+      }
+
+      const name = (window.prompt("请输入新的分组名称", group.name || "") || "").trim();
+      if (!name || name === group.name) {
+        return;
+      }
+
+      group.name = name;
+      group.label = name;
+      group.accounts.forEach((account) => {
+        account.group_name = name;
+      });
+      this.queueGroupsSave(`已重命名为 ${name}`, { immediate: true });
+    },
+
+    deleteGroup(groupId) {
+      const groupIndex = this.groups.findIndex((entry) => entry.id === groupId);
+      if (groupIndex < 0) {
+        return;
+      }
+
+      const group = this.groups[groupIndex];
+      const hasAccounts = group.accounts.length > 0;
+      const confirmed = window.confirm(
+        hasAccounts
+          ? `删除 ${group.name} 后，组内账号会回到未分组。是否继续？`
+          : `确认删除空分组 ${group.name}？`,
+      );
+      if (!confirmed) {
+        return;
+      }
+
+      this.groups.splice(groupIndex, 1);
+      if (hasAccounts) {
+        const unassignedGroup = this.ensureUnassignedGroup();
+        group.accounts.forEach((account) => {
+          this.placeAccountIntoGroup(account, unassignedGroup);
+        });
+      }
+
+      this.updateStats();
+      this.ensureSelection();
+      this.queueGroupsSave(`已删除分组 ${group.name}`, { immediate: true });
+    },
+
+    ensureUnassignedGroup() {
+      let group = this.groups.find((entry) => entry.id === "group-unassigned");
+      if (group) {
+        return group;
+      }
+
+      group = {
+        id: "group-unassigned",
+        name: "未分组",
+        label: "未分组",
+        group_index: this.groups.length + 1,
+        count: 0,
+        accounts: [],
+      };
+      this.groups.push(group);
+      return group;
+    },
+
+    buildGroupId(name) {
+      const safePrefix = name
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "");
+      const prefix = safePrefix || "group";
+      let candidate = `custom-${prefix}`;
+      let suffix = 1;
+      while (this.groups.some((group) => group.id === candidate)) {
+        suffix += 1;
+        candidate = `custom-${prefix}-${suffix}`;
+      }
+      return candidate;
+    },
+
+    beginAccountDrag(email, event) {
+      this.draggedEmail = email;
+      if (event.dataTransfer) {
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", email);
+      }
+    },
+
+    endAccountDrag() {
+      this.draggedEmail = "";
+      this.dragOverGroupId = "";
+    },
+
+    allowGroupDrop(groupId, event) {
+      if (!this.draggedEmail && !event.dataTransfer) {
+        return;
+      }
+      event.preventDefault();
+      this.dragOverGroupId = groupId;
+    },
+
+    leaveGroupDrop(groupId) {
+      if (this.dragOverGroupId === groupId) {
+        this.dragOverGroupId = "";
+      }
+    },
+
+    handleGroupDrop(groupId, event) {
+      event.preventDefault();
+      const email = this.draggedEmail || event.dataTransfer?.getData("text/plain") || "";
+      this.dragOverGroupId = "";
+      this.draggedEmail = "";
+      if (email) {
+        this.moveAccountToGroup(email, groupId);
+      }
+    },
+
+    moveAccountToGroup(email, targetGroupId) {
+      const sourceGroup = this.groups.find((group) => group.accounts.some((account) => account.email === email));
+      const targetGroup = this.groups.find((group) => group.id === targetGroupId);
+      const accountIndex = sourceGroup?.accounts.findIndex((account) => account.email === email) ?? -1;
+      if (!sourceGroup || !targetGroup || accountIndex < 0 || sourceGroup.id === targetGroupId) {
+        return;
+      }
+
+      const [account] = sourceGroup.accounts.splice(accountIndex, 1);
+      this.placeAccountIntoGroup(account, targetGroup);
+      this.updateStats();
+      this.selectGroup(targetGroupId);
+      this.selectedAccountId = account.id;
+      this.scrollAccountIntoView(account.id);
+      this.queueGroupsSave(`已移入 ${targetGroup.name}`, { immediate: true });
+    },
+
+    placeAccountIntoGroup(account, targetGroup) {
+      if (account.tag === "mother") {
+        targetGroup.accounts.forEach((entry) => {
+          if (entry.tag === "mother") {
+            entry.tag = "child";
+            this.syncAccountFlags(entry);
+          }
+        });
+      }
+
+      account.group_id = targetGroup.id;
+      account.group_name = targetGroup.name;
+      targetGroup.accounts.push(account);
+    },
+
     queueGroupsSave(message = "分组已保存", options = {}) {
       const immediate = !!options.immediate;
       const token = ++this.pendingSaveToken;
@@ -533,7 +787,6 @@ function app() {
     },
 
     async persistGroups(token, message = "分组已保存") {
-      this.saveInFlight = true;
       try {
         const data = await this.request("/api/groups", {
           method: "POST",
@@ -555,10 +808,6 @@ function app() {
         if (token === this.pendingSaveToken) {
           this.hintText = error.message;
           await this.refreshStatus({ preserveHint: true });
-        }
-      } finally {
-        if (token === this.pendingSaveToken) {
-          this.saveInFlight = false;
         }
       }
     },
