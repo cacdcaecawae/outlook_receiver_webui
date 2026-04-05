@@ -249,7 +249,10 @@ class OutlookReceiverService:
         self._accounts = accounts
         self._poll_interval = poll_interval
         self._lock = threading.Lock()
+        self._listeners: list[Callable[[dict[str, Any]], None]] = []
         self._listener_generation = 0
+        self._status_sequence = 0
+        self._mail_event_sequence = 0
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._status: dict[str, Any] = {
@@ -257,12 +260,50 @@ class OutlookReceiverService:
             "selected_index": None,
             "selected_account": "",
             "latest_code": "",
+            "latest_message_key": "",
+            "status_event_id": 0,
+            "mail_event_id": 0,
             "subject": "",
             "from": "",
             "folder": "",
             "received_at": "",
             "error": "",
         }
+
+    def _notify_listeners(self, snapshot: dict[str, Any], listeners: list[Callable[[dict[str, Any]], None]]) -> None:
+        for listener in listeners:
+            try:
+                listener(dict(snapshot))
+            except Exception:
+                continue
+
+    def _commit_status(self, **updates: Any) -> dict[str, Any]:
+        with self._lock:
+            if updates.get("latest_message_key"):
+                message_key = str(updates["latest_message_key"])
+                if message_key != self._status.get("latest_message_key"):
+                    self._mail_event_sequence += 1
+                updates["mail_event_id"] = self._mail_event_sequence
+            self._status.update(updates)
+            self._status_sequence += 1
+            self._status["status_event_id"] = self._status_sequence
+            snapshot = dict(self._status)
+            listeners = list(self._listeners)
+        self._notify_listeners(snapshot, listeners)
+        return snapshot
+
+    def subscribe(self, listener: Callable[[dict[str, Any]], None]) -> Callable[[], None]:
+        with self._lock:
+            self._listeners.append(listener)
+            snapshot = dict(self._status)
+
+        listener(dict(snapshot))
+
+        def unsubscribe() -> None:
+            with self._lock:
+                self._listeners = [entry for entry in self._listeners if entry is not listener]
+
+        return unsubscribe
 
     def list_accounts(self) -> list[dict[str, Any]]:
         return [
@@ -286,6 +327,7 @@ class OutlookReceiverService:
         if thread and thread.is_alive():
             thread.join(timeout=1.5)
 
+        should_mark_stopped = False
         with self._lock:
             if self._thread is thread:
                 self._thread = None
@@ -294,7 +336,9 @@ class OutlookReceiverService:
                 and self._status.get("selected_index") is not None
                 and self._status["state"] != "error"
             ):
-                self._status["state"] = "stopped"
+                should_mark_stopped = self._status["state"] != "stopped"
+        if should_mark_stopped:
+            self._commit_status(state="stopped")
 
     def start(self, account_index: int, poller: Optional[Callable[[OutlookAccount, threading.Event], Optional[dict[str, str]]]] = None) -> dict[str, Any]:
         if account_index < 0 or account_index >= len(self._accounts):
@@ -320,19 +364,18 @@ class OutlookReceiverService:
             self._listener_generation += 1
             generation = self._listener_generation
             self._stop_event = stop_event
-            self._status.update(
-                {
-                    "state": "listening",
-                    "selected_index": account_index,
-                    "selected_account": account.email,
-                    "latest_code": "",
-                    "subject": "",
-                    "from": "",
-                    "folder": "",
-                    "received_at": "",
-                    "error": "",
-                }
-            )
+        self._commit_status(
+            state="listening",
+            selected_index=account_index,
+            selected_account=account.email,
+            latest_code="",
+            latest_message_key="",
+            subject="",
+            folder="",
+            received_at="",
+            error="",
+            **{"from": ""},
+        )
 
         thread = threading.Thread(
             target=self._run_listener,
@@ -357,30 +400,28 @@ class OutlookReceiverService:
                 with self._lock:
                     if generation != self._listener_generation:
                         return
-                    if stop_event.is_set():
-                        self._status["state"] = "stopped"
-                        return
-                    if result:
-                        self._status.update(
-                            {
-                                "state": "listening",
-                                "latest_code": result.get("code", ""),
-                                "subject": result.get("subject", ""),
-                                "from": result.get("from", ""),
-                                "folder": result.get("folder", ""),
-                                "received_at": result.get("received_at", ""),
-                                "error": "",
-                            }
-                        )
-                        continue
-                    self._status["state"] = "idle"
+                if stop_event.is_set():
+                    self._commit_status(state="stopped")
                     return
+                if result:
+                    self._commit_status(
+                        state="listening",
+                        latest_code=result.get("code", ""),
+                        latest_message_key=result.get("message_key", ""),
+                        subject=result.get("subject", ""),
+                        folder=result.get("folder", ""),
+                        received_at=result.get("received_at", ""),
+                        error="",
+                        **{"from": result.get("from", "")},
+                    )
+                    continue
+                self._commit_status(state="idle")
+                return
             except Exception as exc:
                 with self._lock:
                     if generation != self._listener_generation:
                         return
-                    self._status["state"] = "error"
-                    self._status["error"] = str(exc)
+                self._commit_status(state="error", error=str(exc))
                 return
 
     def stop(self) -> dict[str, Any]:

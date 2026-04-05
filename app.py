@@ -5,6 +5,8 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
+import threading
+import time
 import urllib.parse
 import webbrowser
 
@@ -39,6 +41,10 @@ class WebUiApp:
         self.service = service
         self.accounts_file = accounts_file or Path("outlook_accounts.txt")
         self.groups_file = groups_file or resolve_groups_file(self.accounts_file)
+        self.events = EventStreamBroker()
+        self._event_lock = threading.Lock()
+        self._latest_mail_event_id = 0
+        self._unsubscribe_status = self.service.subscribe(self._handle_status_event)
 
     @staticmethod
     def _to_public_account_id(account_id: int | None) -> int | None:
@@ -59,6 +65,21 @@ class WebUiApp:
         public_payload["active_account_id"] = public_payload.get("selected_index")
         public_payload["can_stop"] = public_payload.get("state") == "listening"
         return public_payload
+
+    def _handle_status_event(self, payload: dict) -> None:
+        public_payload = self._public_status_payload(payload)
+        self.events.publish("status", public_payload)
+
+        mail_event_id = int(public_payload.get("mail_event_id") or 0)
+        if not mail_event_id:
+            return
+
+        with self._event_lock:
+            if mail_event_id == self._latest_mail_event_id:
+                return
+            self._latest_mail_event_id = mail_event_id
+
+        self.events.publish("mail", public_payload)
 
     def _materialize_accounts(self) -> tuple[list[dict], list[dict]]:
         accounts = self.service.list_accounts()
@@ -98,8 +119,9 @@ class WebUiApp:
             active_account = next((account for account in ordered_accounts if account["email"] == active_email), None)
             if active_account and not active_account.get("listenable"):
                 self.service.stop()
-
-        return self._serialize_accounts_payload()
+        response = self._serialize_accounts_payload()
+        response["listener_status"] = self.api_status()
+        return response
 
     def api_status(self) -> dict:
         payload = self._public_status_payload(self.service.status())
@@ -122,6 +144,83 @@ class WebUiApp:
 
     def api_stop(self) -> dict:
         return self._public_status_payload(self.service.stop())
+
+    def stream_events(self, handler: BaseHTTPRequestHandler, last_event_id: int = 0) -> None:
+        handler.send_response(HTTPStatus.OK)
+        handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        handler.send_header("Cache-Control", "no-cache")
+        handler.send_header("Connection", "keep-alive")
+        handler.send_header("X-Accel-Buffering", "no")
+        handler.end_headers()
+
+        current_last_event_id = max(last_event_id, 0)
+        while True:
+            events = self.events.wait_for_events(current_last_event_id, timeout=15.0)
+            try:
+                if not events:
+                    handler.wfile.write(b": ping\n\n")
+                    handler.wfile.flush()
+                    continue
+
+                for event in events:
+                    payload = json.dumps(event["data"], ensure_ascii=False)
+                    body = (
+                        f"id: {event['id']}\n"
+                        f"event: {event['event']}\n"
+                        f"data: {payload}\n\n"
+                    ).encode("utf-8")
+                    handler.wfile.write(body)
+                    handler.wfile.flush()
+                    current_last_event_id = event["id"]
+            except (BrokenPipeError, ConnectionResetError):
+                return
+
+
+class EventStreamBroker:
+    def __init__(self, max_events: int = 128):
+        self._max_events = max_events
+        self._condition = threading.Condition()
+        self._events: list[dict] = []
+        self._next_id = 1
+
+    def publish(self, event: str, data: dict) -> dict:
+        with self._condition:
+            payload = {
+                "id": self._next_id,
+                "event": event,
+                "data": dict(data),
+            }
+            self._next_id += 1
+            self._events.append(payload)
+            if len(self._events) > self._max_events:
+                self._events = self._events[-self._max_events :]
+            self._condition.notify_all()
+            return {
+                "id": payload["id"],
+                "event": payload["event"],
+                "data": dict(payload["data"]),
+            }
+
+    def wait_for_events(self, last_event_id: int, timeout: float = 15.0) -> list[dict]:
+        deadline = time.monotonic() + timeout
+        with self._condition:
+            while True:
+                pending = [
+                    {
+                        "id": event["id"],
+                        "event": event["event"],
+                        "data": dict(event["data"]),
+                    }
+                    for event in self._events
+                    if event["id"] > last_event_id
+                ]
+                if pending:
+                    return pending
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return []
+                self._condition.wait(remaining)
 
 def _json_response(handler: BaseHTTPRequestHandler, payload: dict, status: int = HTTPStatus.OK) -> None:
     body = json.dumps(payload).encode("utf-8")
@@ -156,6 +255,9 @@ def build_handler(app: WebUiApp):
             if parsed.path == "/api/status":
                 _json_response(self, app.api_status())
                 return
+            if parsed.path == "/api/events":
+                self._stream_events()
+                return
             if parsed.path.startswith("/static/"):
                 self._serve_static(parsed.path.removeprefix("/static/"))
                 return
@@ -187,6 +289,17 @@ def build_handler(app: WebUiApp):
                 return
 
             _json_response(self, {"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
+
+        def _stream_events(self) -> None:
+            parsed = urllib.parse.urlparse(self.path)
+            query = urllib.parse.parse_qs(parsed.query)
+            header_value = self.headers.get("Last-Event-ID", "")
+            raw_last_event_id = header_value or (query.get("last_event_id", ["0"])[0])
+            try:
+                last_event_id = int(raw_last_event_id)
+            except (TypeError, ValueError):
+                last_event_id = 0
+            app.stream_events(self, last_event_id=last_event_id)
 
         def _serve_static(self, relative_path: str, content_type: str | None = None):
             path = (STATIC_DIR / relative_path).resolve()

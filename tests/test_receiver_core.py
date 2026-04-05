@@ -113,6 +113,44 @@ class ReceiverCoreTests(unittest.TestCase):
         self.assertEqual(status["state"], "listening")
         self.assertEqual(status["folder"], "INBOX")
 
+    def test_listener_tracks_mail_event_metadata(self):
+        account = receiver_core.OutlookAccount(
+            email="alpha@example.com",
+            password="pw",
+            client_id="cid",
+            refresh_token="rt",
+        )
+        service = receiver_core.OutlookReceiverService([account], poll_interval=0.01)
+        entered_second_poll = threading.Event()
+        release_second_poll = threading.Event()
+        call_count = {"value": 0}
+
+        def fake_poll(_account, stop_event):
+            call_count["value"] += 1
+            if call_count["value"] == 1:
+                return {
+                    "code": "123456",
+                    "subject": "Your OpenAI code",
+                    "from": "account-security@openai.com",
+                    "folder": "INBOX",
+                    "received_at": "2026-03-29 19:30:00",
+                    "message_key": "INBOX:77",
+                }
+            entered_second_poll.set()
+            release_second_poll.wait(timeout=1)
+            stop_event.set()
+            return None
+
+        service.start(0, poller=fake_poll)
+        self.assertTrue(entered_second_poll.wait(timeout=1))
+        status = service.status()
+        release_second_poll.set()
+        service.stop()
+
+        self.assertEqual(status["latest_message_key"], "INBOX:77")
+        self.assertEqual(status["mail_event_id"], 1)
+        self.assertGreaterEqual(status["status_event_id"], 2)
+
     def test_poll_outlook_account_ignores_existing_junk_mail_at_startup(self):
         account = receiver_core.OutlookAccount(
             email="alpha@example.com",
@@ -664,7 +702,7 @@ class WebUiAppTests(unittest.TestCase):
             service.start(0, poller=blocking_poll)
             self.assertTrue(entered_poll.wait(timeout=1))
 
-            webui.api_save_groups(
+            payload = webui.api_save_groups(
                 {
                     "groups": [
                         {
@@ -682,6 +720,8 @@ class WebUiAppTests(unittest.TestCase):
             status = service.status()
 
             self.assertEqual(status["state"], "stopped")
+            self.assertEqual(payload["listener_status"]["state"], "stopped")
+            self.assertFalse(payload["listener_status"]["is_listening"])
 
     def test_api_start_rejects_banned_accounts(self):
         account = receiver_core.OutlookAccount(
@@ -866,13 +906,54 @@ class WebUiAppTests(unittest.TestCase):
         self.assertTrue(listening_payload["is_listening"])
         self.assertTrue(listening_payload["can_stop"])
         self.assertEqual(listening_payload["active_account_id"], 1)
+
+    def test_webui_publishes_mail_events_with_public_account_ids(self):
+        account = receiver_core.OutlookAccount(
+            email="alpha@example.com",
+            password="pw",
+            client_id="cid",
+            refresh_token="rt",
+        )
+        service = receiver_core.OutlookReceiverService([account], poll_interval=0.01)
+
+        from app import WebUiApp
+
+        webui = WebUiApp(service)
+        initial_events = webui.events.wait_for_events(0, timeout=0.01)
+        last_event_id = initial_events[-1]["id"] if initial_events else 0
+        entered_second_poll = threading.Event()
+        release_second_poll = threading.Event()
+        call_count = {"value": 0}
+
+        def fake_poll(_account, stop_event):
+            call_count["value"] += 1
+            if call_count["value"] == 1:
+                return {
+                    "code": "888888",
+                    "subject": "Fresh OpenAI code",
+                    "from": "account-security@openai.com",
+                    "folder": "INBOX",
+                    "received_at": "2026-03-29 19:45:00",
+                    "message_key": "INBOX:88",
+                }
+            entered_second_poll.set()
+            release_second_poll.wait(timeout=1)
+            stop_event.set()
+            return None
+
+        service.start(0, poller=fake_poll)
+        self.assertTrue(entered_second_poll.wait(timeout=1))
+        events = webui.events.wait_for_events(last_event_id, timeout=1)
+        release_second_poll.set()
+        service.stop()
+
+        mail_events = [event for event in events if event["event"] == "mail"]
+        self.assertTrue(mail_events)
+        self.assertEqual(mail_events[-1]["data"]["active_account_id"], 1)
+        self.assertEqual(mail_events[-1]["data"]["latest_code"], "888888")
+        self.assertEqual(mail_events[-1]["data"]["mail_event_id"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
-
-
-
-
-
-
-
 
