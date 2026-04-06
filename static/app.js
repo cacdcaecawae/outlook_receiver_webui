@@ -9,11 +9,16 @@ function app() {
     groups: [],
     accounts: [],
     accountsFile: "",
+    accountsRoot: "",
+    accountsFiles: [],
     groupsFile: "",
+    customTags: [],
     searchQuery: "",
     searchFocused: false,
     draggedEmail: "",
     dragOverGroupId: "",
+    tagMenuEmail: "",
+    webUsageMenuEmail: "",
 
     latestCode: "",
     latestSubject: "",
@@ -48,6 +53,11 @@ function app() {
       { value: "mother", label: "母号" },
       { value: "child", label: "子号" },
       { value: "banned", label: "封号" },
+    ],
+    webUsageOptions: [
+      { value: "unknown", label: "GPT未知" },
+      { value: "free", label: "GPT空闲" },
+      { value: "busy", label: "GPT占用" },
     ],
 
     async init() {
@@ -94,6 +104,13 @@ function app() {
 
     get displayedAccounts() {
       return this.currentGroup?.accounts || [];
+    },
+
+    get availableTagOptions() {
+      return [
+        ...this.tagOptions,
+        ...this.customTags.map((tag) => ({ value: tag, label: tag })),
+      ];
     },
 
     get selectedAccount() {
@@ -152,6 +169,7 @@ function app() {
         account.note,
         account.group_name,
         this.getTagLabel(account.tag),
+        this.getWebUsageLabel(account.web_usage),
       ]
         .filter(Boolean)
         .some((value) => String(value).toLowerCase().includes(query));
@@ -173,7 +191,10 @@ function app() {
       this.groups = data.account_groups || [];
       this.accounts = this.groups.flatMap((group) => group.accounts);
       this.accountsFile = data.accounts_file || "";
+      this.accountsRoot = data.accounts_root || "";
+      this.accountsFiles = data.accounts_files || [];
       this.groupsFile = data.groups_file || "";
+      this.customTags = data.custom_tags || [];
       this.updateStats();
       this.ensureSelection();
     },
@@ -223,6 +244,24 @@ function app() {
       try {
         const data = await this.request("/api/accounts");
         this.hydrateAccounts(data);
+      } catch (error) {
+        this.hintText = error.message;
+      }
+    },
+
+    async reloadAccounts() {
+      try {
+        const data = await this.request("/api/reload-accounts", {
+          method: "POST",
+          body: JSON.stringify({}),
+        });
+        this.hydrateAccounts(data);
+        if (data.listener_status) {
+          this.applyStatus(data.listener_status, { preserveHint: true });
+        } else {
+          await this.refreshStatus({ preserveHint: true });
+        }
+        this.hintText = `已刷新 ${this.accounts.length} 个账号，来源 ${this.accountsFiles.length} 个文件`;
       } catch (error) {
         this.hintText = error.message;
       }
@@ -557,6 +596,7 @@ function app() {
       }
 
       account.tag = tag;
+      this.tagMenuEmail = "";
       this.syncAccountFlags(account);
       this.updateStats();
       const shouldStopActiveListener = tag === "banned" && this.state === "listening" && this.activeAccountId === account.id;
@@ -564,6 +604,62 @@ function app() {
         shouldStopActiveListener ? "封号已标记，正在停止监听..." : "标签已更新",
         { immediate: shouldStopActiveListener },
       );
+    },
+
+    createCustomTag(email) {
+      const rawValue = window.prompt("请输入新的共用标记", "");
+      if (rawValue === null) {
+        return;
+      }
+
+      const nextTag = rawValue.trim();
+      if (!nextTag) {
+        return;
+      }
+
+      const builtinTag = this.tagOptions.find(
+        (option) => option.label === nextTag || option.value === nextTag,
+      );
+      if (builtinTag) {
+        this.setTag(email, builtinTag.value);
+        return;
+      }
+
+      if (!this.customTags.includes(nextTag)) {
+        this.customTags.push(nextTag);
+      }
+      this.setTag(email, nextTag);
+    },
+
+    toggleTagMenu(email) {
+      this.webUsageMenuEmail = "";
+      this.tagMenuEmail = this.tagMenuEmail === email ? "" : email;
+    },
+
+    isTagMenuOpen(email) {
+      return this.tagMenuEmail === email;
+    },
+
+    toggleWebUsageMenu(email) {
+      this.tagMenuEmail = "";
+      this.webUsageMenuEmail = this.webUsageMenuEmail === email ? "" : email;
+    },
+
+    isWebUsageMenuOpen(email) {
+      return this.webUsageMenuEmail === email;
+    },
+
+    setWebUsage(email, webUsage) {
+      const group = this.groups.find((entry) => entry.accounts.some((account) => account.email === email));
+      const account = group?.accounts.find((entry) => entry.email === email);
+      if (!account || account.web_usage === webUsage) {
+        this.webUsageMenuEmail = "";
+        return;
+      }
+
+      account.web_usage = webUsage;
+      this.webUsageMenuEmail = "";
+      this.queueGroupsSave("网页版状态已更新");
     },
 
     editNote(email) {
@@ -774,12 +870,14 @@ function app() {
 
     buildGroupsPayload() {
       return {
+        custom_tags: this.customTags,
         groups: this.groups.map((group) => ({
           id: group.id,
           name: group.name,
           accounts: group.accounts.map((account) => ({
             email: account.email,
             tag: account.tag,
+            web_usage: account.web_usage || "unknown",
             note: account.note || "",
           })),
         })),
@@ -819,7 +917,7 @@ function app() {
         unmarked: "bg-slate-100 text-slate-600",
         banned: "bg-red-100 text-red-700",
       };
-      return classes[tag] || classes.unmarked;
+      return classes[tag] || "bg-violet-100 text-violet-700";
     },
 
     getTagLabel(tag) {
@@ -829,7 +927,25 @@ function app() {
         unmarked: "未标记",
         banned: "封号",
       };
-      return labels[tag] || labels.unmarked;
+      return labels[tag] || tag || labels.unmarked;
+    },
+
+    getWebUsageClass(webUsage) {
+      const classes = {
+        unknown: "bg-slate-100 text-slate-600",
+        free: "bg-emerald-100 text-emerald-700",
+        busy: "bg-rose-100 text-rose-700",
+      };
+      return classes[webUsage] || classes.unknown;
+    },
+
+    getWebUsageLabel(webUsage) {
+      const labels = {
+        unknown: "GPT未知",
+        free: "GPT空闲",
+        busy: "GPT占用",
+      };
+      return labels[webUsage] || labels.unknown;
     },
 
     getStateLabel(state) {

@@ -11,6 +11,7 @@ DEFAULT_MOTHER_TAG = "mother"
 DEFAULT_CHILD_TAG = "child"
 DEFAULT_UNMARKED_TAG = "unmarked"
 DEFAULT_BANNED_TAG = "banned"
+DEFAULT_WEB_USAGE = "unknown"
 UNASSIGNED_GROUP_ID = "group-unassigned"
 UNASSIGNED_GROUP_NAME = "\u672a\u5206\u7ec4"
 VALID_TAGS = {
@@ -19,6 +20,7 @@ VALID_TAGS = {
     DEFAULT_UNMARKED_TAG,
     DEFAULT_BANNED_TAG,
 }
+VALID_WEB_USAGE = {"unknown", "free", "busy"}
 
 
 def resolve_groups_file(accounts_file: Path, cli_path: str = "") -> Path:
@@ -37,7 +39,14 @@ def build_default_group_config(
         group_accounts: list[dict[str, Any]] = []
         for position, account in enumerate(accounts[offset : offset + group_size]):
             _ = position
-            group_accounts.append({"email": account["email"], "tag": DEFAULT_UNMARKED_TAG, "note": ""})
+            group_accounts.append(
+                {
+                    "email": account["email"],
+                    "tag": DEFAULT_UNMARKED_TAG,
+                    "web_usage": DEFAULT_WEB_USAGE,
+                    "note": "",
+                }
+            )
         groups.append(
             {
                 "id": f"group-{group_index}",
@@ -45,7 +54,7 @@ def build_default_group_config(
                 "accounts": group_accounts,
             }
         )
-    return {"version": ACCOUNT_GROUP_VERSION, "groups": groups}
+    return {"version": ACCOUNT_GROUP_VERSION, "custom_tags": [], "groups": groups}
 
 
 def load_group_config(path: Path) -> dict[str, Any]:
@@ -82,6 +91,7 @@ def normalize_loaded_group_config(
     group_size: int = DEFAULT_GROUP_SIZE,
 ) -> dict[str, Any]:
     raw_config = migrate_legacy_default_tags(raw_config)
+    custom_tags = normalize_custom_tags(raw_config.get("custom_tags"))
     account_by_email = {account["email"]: account for account in accounts}
     ordered_emails = [account["email"] for account in accounts]
     consumed: set[str] = set()
@@ -102,10 +112,12 @@ def normalize_loaded_group_config(
                 continue
             local_seen.add(email)
             consumed.add(email)
+            register_custom_tag(raw_account.get("tag"), custom_tags)
             group_accounts.append(
                 {
                     "email": email,
-                    "tag": normalize_tag(raw_account.get("tag")),
+                    "tag": normalize_tag(raw_account.get("tag"), custom_tags),
+                    "web_usage": normalize_web_usage(raw_account.get("web_usage")),
                     "note": normalize_note(raw_account.get("note")),
                 }
             )
@@ -121,6 +133,7 @@ def normalize_loaded_group_config(
             {
                 "email": email,
                 "tag": DEFAULT_UNMARKED_TAG,
+                "web_usage": DEFAULT_WEB_USAGE,
                 "note": "",
             }
             for position, email in enumerate(chunk)
@@ -134,13 +147,14 @@ def normalize_loaded_group_config(
         )
         next_index += 1
 
-    return {"version": ACCOUNT_GROUP_VERSION, "groups": groups}
+    return {"version": ACCOUNT_GROUP_VERSION, "custom_tags": custom_tags, "groups": groups}
 
 
 def normalize_submitted_group_config(
     raw_config: dict[str, Any],
     accounts: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    custom_tags = normalize_custom_tags(raw_config.get("custom_tags"))
     account_by_email = {account["email"]: account for account in accounts}
     ordered_emails = [account["email"] for account in accounts]
     consumed: set[str] = set()
@@ -161,10 +175,12 @@ def normalize_submitted_group_config(
                 continue
             local_seen.add(email)
             consumed.add(email)
+            register_custom_tag(raw_account.get("tag"), custom_tags)
             group_accounts.append(
                 {
                     "email": email,
-                    "tag": normalize_tag(raw_account.get("tag")),
+                    "tag": normalize_tag(raw_account.get("tag"), custom_tags),
+                    "web_usage": normalize_web_usage(raw_account.get("web_usage")),
                     "note": normalize_note(raw_account.get("note")),
                 }
             )
@@ -177,11 +193,19 @@ def normalize_submitted_group_config(
             {
                 "id": UNASSIGNED_GROUP_ID,
                 "name": UNASSIGNED_GROUP_NAME,
-                "accounts": [{"email": email, "tag": DEFAULT_UNMARKED_TAG, "note": ""} for email in remaining],
+                "accounts": [
+                    {
+                        "email": email,
+                        "tag": DEFAULT_UNMARKED_TAG,
+                        "web_usage": DEFAULT_WEB_USAGE,
+                        "note": "",
+                    }
+                    for email in remaining
+                ],
             }
         )
 
-    return {"version": ACCOUNT_GROUP_VERSION, "groups": groups}
+    return {"version": ACCOUNT_GROUP_VERSION, "custom_tags": custom_tags, "groups": groups}
 
 
 def materialize_account_groups(
@@ -189,6 +213,7 @@ def materialize_account_groups(
     accounts: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     account_by_email = {account["email"]: account for account in accounts}
+    custom_tags = normalize_custom_tags(config.get("custom_tags"))
     groups: list[dict[str, Any]] = []
     ordered_accounts: list[dict[str, Any]] = []
 
@@ -199,7 +224,8 @@ def materialize_account_groups(
             if account is None:
                 continue
             hydrated = dict(account)
-            hydrated["tag"] = normalize_tag(entry.get("tag"))
+            hydrated["tag"] = normalize_tag(entry.get("tag"), custom_tags)
+            hydrated["web_usage"] = normalize_web_usage(entry.get("web_usage"))
             hydrated["note"] = normalize_note(entry.get("note"))
             hydrated["group_id"] = group["id"]
             hydrated["group_name"] = group["name"]
@@ -222,9 +248,12 @@ def materialize_account_groups(
     return groups, ordered_accounts
 
 
-def normalize_tag(value: Any) -> str | None:
+def normalize_tag(value: Any, custom_tags: list[str] | None = None) -> str | None:
     if value in VALID_TAGS:
         return str(value)
+    normalized_custom_tag = normalize_custom_tag(value)
+    if normalized_custom_tag and normalized_custom_tag in (custom_tags or []):
+        return normalized_custom_tag
     return DEFAULT_UNMARKED_TAG
 
 
@@ -232,6 +261,39 @@ def normalize_note(value: Any) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+def normalize_custom_tags(values: Any) -> list[str]:
+    if not isinstance(values, list):
+        return []
+
+    tags: list[str] = []
+    for value in values:
+        register_custom_tag(value, tags)
+    return tags
+
+
+def register_custom_tag(value: Any, tags: list[str]) -> None:
+    normalized = normalize_custom_tag(value)
+    if not normalized:
+        return
+    if normalized not in tags:
+        tags.append(normalized)
+
+
+def normalize_custom_tag(value: Any) -> str:
+    if value is None:
+        return ""
+    normalized = str(value).strip()
+    if not normalized or normalized in VALID_TAGS:
+        return ""
+    return normalized
+
+
+def normalize_web_usage(value: Any) -> str:
+    if value in VALID_WEB_USAGE:
+        return str(value)
+    return DEFAULT_WEB_USAGE
 
 
 def migrate_legacy_default_tags(raw_config: dict[str, Any]) -> dict[str, Any]:
@@ -267,6 +329,7 @@ def migrate_legacy_default_tags(raw_config: dict[str, Any]) -> dict[str, Any]:
                     {
                         "email": account.get("email"),
                         "tag": DEFAULT_UNMARKED_TAG,
+                        "web_usage": DEFAULT_WEB_USAGE,
                         "note": "",
                     }
                     for account in group.get("accounts", [])
@@ -274,7 +337,7 @@ def migrate_legacy_default_tags(raw_config: dict[str, Any]) -> dict[str, Any]:
             }
         )
 
-    return {"version": ACCOUNT_GROUP_VERSION, "groups": migrated_groups}
+    return {"version": ACCOUNT_GROUP_VERSION, "custom_tags": [], "groups": migrated_groups}
 
 def get_disabled_reason(account: dict[str, Any]) -> str | None:
     if not account.get("ready"):

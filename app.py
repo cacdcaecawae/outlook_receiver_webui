@@ -31,16 +31,41 @@ def resolve_accounts_file(cli_path: str = "") -> Path:
     return BASE_DIR / "outlook_accounts.txt"
 
 
+def discover_accounts_files(accounts_file: Path) -> list[Path]:
+    root = accounts_file.parent
+    matches = sorted(
+        [path for path in root.glob("*.txt") if "outlook" in path.name.lower()],
+        key=lambda path: path.name.lower(),
+    )
+    if accounts_file.is_file() and accounts_file not in matches:
+        matches.append(accounts_file)
+        matches.sort(key=lambda path: path.name.lower())
+    return matches
+
+
+def load_accounts_from_root(accounts_file: Path) -> tuple[list, list[Path]]:
+    files = discover_accounts_files(accounts_file)
+    deduped_accounts: dict[str, object] = {}
+    for path in files:
+        for account in load_accounts(path):
+            deduped_accounts.pop(account.email, None)
+            deduped_accounts[account.email] = account
+    return list(deduped_accounts.values()), files
+
+
 class WebUiApp:
     def __init__(
         self,
         service: OutlookReceiverService,
         accounts_file: Path | None = None,
         groups_file: Path | None = None,
+        accounts_files: list[Path] | None = None,
     ):
         self.service = service
         self.accounts_file = accounts_file or Path("outlook_accounts.txt")
         self.groups_file = groups_file or resolve_groups_file(self.accounts_file)
+        self.accounts_root = self.accounts_file.parent
+        self.accounts_files = list(accounts_files or discover_accounts_files(self.accounts_file))
         self.events = EventStreamBroker()
         self._event_lock = threading.Lock()
         self._latest_mail_event_id = 0
@@ -81,13 +106,14 @@ class WebUiApp:
 
         self.events.publish("mail", public_payload)
 
-    def _materialize_accounts(self) -> tuple[list[dict], list[dict]]:
+    def _materialize_accounts(self) -> tuple[dict, list[dict], list[dict]]:
         accounts = self.service.list_accounts()
         config = ensure_group_config(self.groups_file, accounts, group_size=DEFAULT_GROUP_SIZE)
-        return materialize_account_groups(config, accounts)
+        account_groups, ordered_accounts = materialize_account_groups(config, accounts)
+        return config, account_groups, ordered_accounts
 
     def _serialize_accounts_payload(self) -> dict:
-        account_groups, ordered_accounts = self._materialize_accounts()
+        config, account_groups, ordered_accounts = self._materialize_accounts()
         for account in ordered_accounts:
             account["id"] = self._to_public_account_id(account["id"])
 
@@ -98,14 +124,39 @@ class WebUiApp:
             "unready_count": len(ordered_accounts) - ready_count,
             "group_count": len(account_groups),
             "accounts_file": str(self.accounts_file),
+            "accounts_root": str(self.accounts_root),
+            "accounts_files": [str(path) for path in self.accounts_files],
             "groups_file": str(self.groups_file),
             "accounts": ordered_accounts,
             "account_group_size": DEFAULT_GROUP_SIZE,
+            "custom_tags": config.get("custom_tags", []),
             "account_groups": account_groups,
         }
 
     def api_accounts(self) -> dict:
         return self._serialize_accounts_payload()
+
+    def api_reload_accounts(self) -> dict:
+        current_status = self.service.status()
+        was_listening = current_status.get("state") == "listening"
+        active_email = str(current_status.get("selected_account") or "")
+
+        if was_listening:
+            self.service.stop()
+
+        accounts, files = load_accounts_from_root(self.accounts_file)
+        self.accounts_files = files
+        self.service.set_accounts(accounts)
+
+        if was_listening and active_email:
+            _, _, ordered_accounts = self._materialize_accounts()
+            active_account = next((account for account in ordered_accounts if account["email"] == active_email), None)
+            if active_account and active_account.get("listenable"):
+                self.service.start(active_account["id"])
+
+        response = self._serialize_accounts_payload()
+        response["listener_status"] = self.api_status()
+        return response
 
     def api_save_groups(self, payload: dict) -> dict:
         accounts = self.service.list_accounts()
@@ -132,7 +183,7 @@ class WebUiApp:
 
     def api_start(self, account_id: int) -> dict:
         internal_account_id = self._to_internal_account_id(account_id)
-        _, ordered_accounts = self._materialize_accounts()
+        _, _, ordered_accounts = self._materialize_accounts()
         target_account = next((account for account in ordered_accounts if account["id"] == internal_account_id), None)
         if target_account is None:
             raise IndexError("Invalid account selection")
@@ -281,6 +332,9 @@ def build_handler(app: WebUiApp):
                 if parsed.path == "/api/stop":
                     _json_response(self, app.api_stop())
                     return
+                if parsed.path == "/api/reload-accounts":
+                    _json_response(self, app.api_reload_accounts())
+                    return
                 if parsed.path == "/api/groups":
                     _json_response(self, app.api_save_groups(payload))
                     return
@@ -332,13 +386,14 @@ def main() -> None:
 
     accounts_file = resolve_accounts_file(args.accounts_file)
     groups_file = resolve_groups_file(accounts_file, args.groups_file)
-    accounts = load_accounts(accounts_file)
+    accounts, account_files = load_accounts_from_root(accounts_file)
     service = OutlookReceiverService(accounts)
-    app = WebUiApp(service, accounts_file, groups_file=groups_file)
+    app = WebUiApp(service, accounts_file, groups_file=groups_file, accounts_files=account_files)
     server = ThreadingHTTPServer((args.host, args.port), build_handler(app))
     url = f"http://{args.host}:{args.port}"
     print(f"[WebUI] Listening on {url}")
     print(f"[WebUI] Accounts file: {accounts_file}")
+    print(f"[WebUI] Accounts root: {accounts_file.parent}")
     print(f"[WebUI] Groups file: {groups_file}")
     if not args.no_browser:
         webbrowser.open(url)

@@ -19,9 +19,8 @@ OUTLOOK_IMAP_PORT = 993
 OUTLOOK_IMAP_RECENT_LIMIT = 25
 DEFAULT_POLL_INTERVAL = 3.0
 OUTLOOK_FOLDERS = ("INBOX", "Junk", "Junk Email")
-OPENAI_HINTS = ("openai", "chatgpt", "auth.openai.com", "platform.openai.com")
 CODE_REGEX = re.compile(r"(?<!\d)(\d{6})(?!\d)")
-LINK_REGEX = re.compile(r'https?://[^\s"\'<>]+(?:verify|confirm|activation|email-verification)[^\s"\'<>]*')
+LINK_REGEX = re.compile(r'https?://[^\s"\'<>]+', re.IGNORECASE)
 
 
 @dataclass(slots=True)
@@ -84,11 +83,6 @@ def _get_email_body(message) -> str:
             charset = message.get_content_charset() or "utf-8"
             body_parts.append(payload.decode(charset, errors="replace"))
     return "\n".join(body_parts)
-
-
-def _looks_like_openai_mail(sender: str, subject: str, body: str) -> bool:
-    content = "\n".join([sender, subject, body]).lower()
-    return any(hint in content for hint in OPENAI_HINTS)
 
 
 def _message_key(folder: str, msg_id: bytes) -> str:
@@ -175,8 +169,6 @@ def _extract_result_from_message(folder: str, msg_id: bytes, raw_email: bytes) -
     subject = _decode_mime_str(message.get("Subject", ""))
     sender = _decode_mime_str(message.get("From", ""))
     body = _get_email_body(message)
-    if not _looks_like_openai_mail(sender, subject, body):
-        return None
 
     content = "\n".join([sender, subject, body])
     code_match = CODE_REGEX.search(content)
@@ -315,6 +307,10 @@ class OutlookReceiverService:
                 }
             for index, account in enumerate(self._accounts)
         ]
+
+    def set_accounts(self, accounts: list[OutlookAccount]) -> None:
+        with self._lock:
+            self._accounts = list(accounts)
 
     def _stop_current_listener(self, *, mark_stopped: bool) -> None:
         with self._lock:

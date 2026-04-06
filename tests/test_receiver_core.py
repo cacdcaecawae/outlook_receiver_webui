@@ -349,6 +349,32 @@ class ReceiverCoreTests(unittest.TestCase):
         self.assertEqual(result["subject"], "Inbox OpenAI code")
         self.assertEqual(result["folder"], "INBOX")
 
+    def test_extract_result_accepts_generic_six_digit_mail(self):
+        raw_email = _message_bytes(
+            "no-reply@example.com",
+            "Verification code",
+            "Your sign-in code is 445566.",
+        )
+
+        result = receiver_core._extract_result_from_message("INBOX", b"10", raw_email)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["code"], "445566")
+        self.assertEqual(result["from"], "no-reply@example.com")
+
+    def test_extract_result_accepts_generic_verification_link_mail(self):
+        raw_email = _message_bytes(
+            "accounts@example.com",
+            "Confirm your email",
+            "Open https://example.com/verify?code=link-token-123 to continue.",
+        )
+
+        result = receiver_core._extract_result_from_message("INBOX", b"11", raw_email)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["code"], "link-token-123")
+        self.assertEqual(result["from"], "accounts@example.com")
+
 
 class WebUiAppTests(unittest.TestCase):
     def test_resolve_accounts_file_defaults_to_local_project_file(self):
@@ -357,6 +383,59 @@ class WebUiAppTests(unittest.TestCase):
         resolved = resolve_accounts_file()
 
         self.assertEqual(resolved, BASE_DIR / "outlook_accounts.txt")
+
+    def test_load_accounts_from_root_reads_all_outlook_txt_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            primary = root / "outlook_accounts.txt"
+            primary.write_text(
+                "alpha@example.com----pw1----cid1----rt1\n",
+                encoding="utf-8",
+            )
+            extra = root / "team_outlook_extra.txt"
+            extra.write_text(
+                "beta@example.com----pw2----cid2----rt2\n",
+                encoding="utf-8",
+            )
+            ignored = root / "notes.txt"
+            ignored.write_text(
+                "gamma@example.com----pw3----cid3----rt3\n",
+                encoding="utf-8",
+            )
+
+            from app import load_accounts_from_root
+
+            accounts, files = load_accounts_from_root(primary)
+
+            self.assertEqual([path.name for path in files], ["outlook_accounts.txt", "team_outlook_extra.txt"])
+            self.assertEqual([account.email for account in accounts], ["alpha@example.com", "beta@example.com"])
+
+    def test_api_reload_accounts_reads_new_outlook_txt_files_from_root(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            primary = root / "outlook_accounts.txt"
+            primary.write_text(
+                "alpha@example.com----pw1----cid1----rt1\n",
+                encoding="utf-8",
+            )
+            groups_file = root / "account_groups.json"
+
+            from app import WebUiApp, load_accounts_from_root
+
+            accounts, files = load_accounts_from_root(primary)
+            service = receiver_core.OutlookReceiverService(accounts)
+            webui = WebUiApp(service, accounts_file=primary, groups_file=groups_file, accounts_files=files)
+
+            (root / "new_outlook_pool.txt").write_text(
+                "beta@example.com----pw2----cid2----rt2\n",
+                encoding="utf-8",
+            )
+
+            payload = webui.api_reload_accounts()
+
+            self.assertEqual(payload["count"], 2)
+            self.assertEqual([Path(path).name for path in payload["accounts_files"]], ["new_outlook_pool.txt", "outlook_accounts.txt"])
+            self.assertEqual([account["email"] for account in payload["accounts"]], ["beta@example.com", "alpha@example.com"])
 
     def test_resolve_groups_file_defaults_to_accounts_sibling_file(self):
         from app import resolve_groups_file
@@ -479,20 +558,31 @@ class WebUiAppTests(unittest.TestCase):
                 json.dumps(
                     {
                         "version": 1,
+                        "custom_tags": ["plus"],
                         "groups": [
                             {
                                 "id": "vip",
                                 "name": "VIP 组",
                                 "accounts": [
                                     {"email": "gamma@example.com", "tag": "mother", "note": "主账号"},
-                                    {"email": "alpha@example.com", "tag": "unmarked", "note": ""},
+                                    {
+                                        "email": "alpha@example.com",
+                                        "tag": "plus",
+                                        "web_usage": "busy",
+                                        "note": "",
+                                    },
                                 ],
                             },
                             {
                                 "id": "spare",
                                 "name": "备用组",
                                 "accounts": [
-                                    {"email": "beta@example.com", "tag": "banned", "note": "已封"},
+                                    {
+                                        "email": "beta@example.com",
+                                        "tag": "banned",
+                                        "web_usage": "free",
+                                        "note": "已封",
+                                    },
                                 ],
                             },
                         ],
@@ -510,6 +600,7 @@ class WebUiAppTests(unittest.TestCase):
             ).api_accounts()
 
             self.assertEqual([group["id"] for group in payload["account_groups"]], ["vip", "spare"])
+            self.assertEqual(payload["custom_tags"], ["plus"])
             self.assertEqual(payload["account_groups"][0]["name"], "VIP 组")
             self.assertEqual(
                 [account["email"] for account in payload["account_groups"][0]["accounts"]],
@@ -517,8 +608,10 @@ class WebUiAppTests(unittest.TestCase):
             )
             self.assertEqual(payload["account_groups"][0]["accounts"][0]["tag"], "mother")
             self.assertEqual(payload["account_groups"][0]["accounts"][0]["note"], "主账号")
-            self.assertEqual(payload["account_groups"][0]["accounts"][1]["tag"], "unmarked")
+            self.assertEqual(payload["account_groups"][0]["accounts"][1]["tag"], "plus")
+            self.assertEqual(payload["account_groups"][0]["accounts"][1]["web_usage"], "busy")
             self.assertEqual(payload["account_groups"][1]["accounts"][0]["tag"], "banned")
+            self.assertEqual(payload["account_groups"][1]["accounts"][0]["web_usage"], "free")
 
     def test_api_accounts_drops_stale_groups_with_missing_accounts(self):
         accounts = [
@@ -652,6 +745,7 @@ class WebUiAppTests(unittest.TestCase):
             )
             payload = webui.api_save_groups(
                 {
+                    "custom_tags": ["plus"],
                     "groups": [
                         {
                             "id": "solo",
@@ -664,7 +758,12 @@ class WebUiAppTests(unittest.TestCase):
                             "id": "holding",
                             "name": "待整理",
                             "accounts": [
-                                {"email": "alpha@example.com", "tag": "unmarked", "note": "待整理"},
+                                {
+                                    "email": "alpha@example.com",
+                                    "tag": "plus",
+                                    "web_usage": "busy",
+                                    "note": "待整理",
+                                },
                             ],
                         },
                     ]
@@ -672,13 +771,19 @@ class WebUiAppTests(unittest.TestCase):
             )
 
             stored = json.loads(groups_file.read_text(encoding="utf-8"))
+            self.assertEqual(stored["custom_tags"], ["plus"])
             self.assertEqual([group["id"] for group in stored["groups"]], ["solo", "holding"])
             self.assertEqual(stored["groups"][0]["accounts"][0]["email"], "beta@example.com")
             self.assertEqual(stored["groups"][0]["accounts"][0]["tag"], "mother")
             self.assertEqual(stored["groups"][0]["accounts"][0]["note"], "主接码")
+            self.assertEqual(stored["groups"][1]["accounts"][0]["tag"], "plus")
+            self.assertEqual(stored["groups"][1]["accounts"][0]["web_usage"], "busy")
             self.assertEqual(payload["account_groups"][0]["name"], "单独监听")
+            self.assertEqual(payload["custom_tags"], ["plus"])
             self.assertEqual(payload["account_groups"][0]["accounts"][0]["email"], "beta@example.com")
             self.assertEqual(payload["account_groups"][1]["accounts"][0]["note"], "待整理")
+            self.assertEqual(payload["account_groups"][1]["accounts"][0]["tag"], "plus")
+            self.assertEqual(payload["account_groups"][1]["accounts"][0]["web_usage"], "busy")
 
     def test_api_save_groups_preserves_empty_custom_groups(self):
         accounts = [
