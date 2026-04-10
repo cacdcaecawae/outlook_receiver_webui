@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import email as email_lib
 from email.header import decode_header
+import html
 import imaplib
 import json
 from pathlib import Path
@@ -21,6 +22,22 @@ DEFAULT_POLL_INTERVAL = 3.0
 OUTLOOK_FOLDERS = ("INBOX", "Junk", "Junk Email")
 CODE_REGEX = re.compile(r"(?<!\d)(\d{6})(?!\d)")
 LINK_REGEX = re.compile(r'https?://[^\s"\'<>]+', re.IGNORECASE)
+_HTML_STYLE_SCRIPT_RE = re.compile(r"<(style|script)[^>]*>.*?</\1>", re.DOTALL | re.IGNORECASE)
+_HTML_TAG_RE = re.compile(r"<[^>]+>", re.DOTALL)
+
+
+def _strip_html(text: str) -> str:
+    """Remove HTML tags, style/script blocks, and decode entities.
+
+    HTML emails embed CSS hex colors like ``color:#202123`` inside style
+    attributes; the bare digits would otherwise be picked up by CODE_REGEX as
+    false-positive verification codes.
+    """
+    if "<" not in text:
+        return text
+    cleaned = _HTML_STYLE_SCRIPT_RE.sub(" ", text)
+    cleaned = _HTML_TAG_RE.sub(" ", cleaned)
+    return html.unescape(cleaned)
 
 
 @dataclass(slots=True)
@@ -170,10 +187,12 @@ def _extract_result_from_message(folder: str, msg_id: bytes, raw_email: bytes) -
     sender = _decode_mime_str(message.get("From", ""))
     body = _get_email_body(message)
 
-    content = "\n".join([sender, subject, body])
-    code_match = CODE_REGEX.search(content)
+    text_body = _strip_html(body)
+    code_content = "\n".join([sender, subject, text_body])
+    code_match = CODE_REGEX.search(code_content)
     if not code_match:
-        link_match = LINK_REGEX.search(content)
+        link_content = "\n".join([sender, subject, body])
+        link_match = LINK_REGEX.search(link_content)
         if link_match:
             code_match = re.search(r"[?&]code=([^&\s]+)", link_match.group(0))
     if not code_match:

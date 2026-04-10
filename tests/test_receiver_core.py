@@ -11,8 +11,8 @@ from unittest.mock import patch
 import receiver_core
 
 
-def _message_bytes(sender: str, subject: str, body: str) -> bytes:
-    msg = MIMEText(body, "plain", "utf-8")
+def _message_bytes(sender: str, subject: str, body: str, subtype: str = "plain") -> bytes:
+    msg = MIMEText(body, subtype, "utf-8")
     msg["From"] = sender
     msg["Subject"] = subject
     return msg.as_bytes()
@@ -361,6 +361,34 @@ class ReceiverCoreTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["code"], "445566")
         self.assertEqual(result["from"], "no-reply@example.com")
+
+    def test_extract_result_skips_css_hex_colors_in_html_body(self):
+        # Regression for the real-world ChatGPT Chinese login-code email whose
+        # HTML body embeds ``color:#202123`` — without stripping HTML the regex
+        # would return ``202123`` instead of the actual six-digit code.
+        html_body = """
+<html><head><style>.banner { color:#202123; }</style></head>
+<body>
+  <div style="color:#202123; padding: 56px;">
+    <img src="https://cdn.openai.com/logo.png" alt="OpenAI">
+  </div>
+  <table style="color:#353740;">
+    <tr><td>输入此临时验证码以继续：</td></tr>
+    <tr><td style="font-size:24px;">527971</td></tr>
+  </table>
+</body></html>
+"""
+        raw_email = _message_bytes(
+            "OpenAI <noreply@tm1.openai.com>",
+            "你的临时 ChatGPT 登录代码",
+            html_body,
+            subtype="html",
+        )
+
+        result = receiver_core._extract_result_from_message("INBOX", b"12", raw_email)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["code"], "527971")
 
     def test_extract_result_accepts_generic_verification_link_mail(self):
         raw_email = _message_bytes(
